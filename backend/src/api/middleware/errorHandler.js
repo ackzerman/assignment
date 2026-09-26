@@ -13,8 +13,10 @@
  */
 
 const { AppError, ValidationFailedError } = require('../../errors/AppError');
+const { logger } = require('../../observability/logger');
+const { recordError } = require('../../observability/metrics');
 
-function errorHandler(err, _req, res, _next) {
+function errorHandler(err, req, res, _next) {
   // Validation errors — return structured field-level errors
   if (err instanceof ValidationFailedError) {
     res.status(400).json({
@@ -26,9 +28,11 @@ function errorHandler(err, _req, res, _next) {
   }
 
   // JSON parse errors — client sent malformed JSON
-  // Threat: Request smuggling / malformed input
-  // Protection: Return 400 with a helpful (but not revealing) message
   if (err instanceof SyntaxError && err.message.includes('JSON')) {
+    logger.warn('Malformed JSON in request', {
+      requestId: req.id,
+      error: err.message,
+    });
     res.status(400).json({
       status: 'error',
       message: 'Request body contains invalid JSON. Please check the format.',
@@ -47,11 +51,12 @@ function errorHandler(err, _req, res, _next) {
 
   // Unknown/programming errors — log internally, return generic message
   // SECURITY: Never expose stack traces, file paths, or internal details
-  console.error('[UNHANDLED ERROR]', {
-    name: err.name,
-    message: err.message,
+  recordError();
+  logger.error('Unhandled error', {
+    requestId: req.id,
+    errorName: err.name,
+    errorMessage: err.message,
     stack: err.stack,
-    timestamp: new Date().toISOString(),
   });
 
   res.status(500).json({

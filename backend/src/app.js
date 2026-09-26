@@ -6,14 +6,16 @@
  * without starting the server.
  *
  * MIDDLEWARE ORDER (important):
- * 1. Helmet (security headers) — must be first to set headers on all responses
- * 2. CORS — must be before routes for preflight to work
- * 3. Rate limiting — before body parsing to reject early
- * 4. Body parsing (express.json) — with size limit
- * 5. Input sanitization — after parsing, before routes
- * 6. Content-Type enforcement — before routes
- * 7. Routes
- * 8. Error handler — must be last
+ * 1. Request ID — assign unique ID for log correlation (must be first)
+ * 2. Helmet (security headers) — set headers on all responses
+ * 3. CORS — must be before routes for preflight to work
+ * 4. Rate limiting — before body parsing to reject early
+ * 5. Body parsing (express.json) — with size limit
+ * 6. Input sanitization — after parsing, before routes
+ * 7. Content-Type enforcement — before routes
+ * 8. Request logging — log after body is parsed
+ * 9. Routes
+ * 10. Error handler — must be last
  */
 
 const express = require('express');
@@ -27,46 +29,67 @@ const {
   sanitizeInput,
   requireJsonContentType,
 } = require('./api/middleware/security');
+const { requestId, requestLogger } = require('./api/middleware/requestLogger');
+const { getMetrics } = require('./observability/metrics');
+const { checkForAnomalies } = require('./observability/anomalyDetector');
 
 const app = express();
 
-// --- 1. Security Headers (helmet) ---
-// Threat: XSS, clickjacking, MIME sniffing
-// Protection: HTTP security headers on every response
+// --- 1. Request ID ---
+// Assigns a unique ID for log correlation across the request lifecycle
+app.use(requestId);
+
+// --- 2. Security Headers (helmet) ---
 app.use(createHelmetMiddleware());
 
-// --- 2. CORS ---
-// Threat: Cross-origin abuse
-// Protection: Restrict to known frontend origins in production
+// --- 3. CORS ---
 app.use(createCorsMiddleware());
 
-// --- 3. Rate Limiting ---
-// Threat: DDoS, brute-force, resource exhaustion
-// Protection: Per-IP request limits
+// --- 4. Rate Limiting ---
 app.use('/api/', createGeneralRateLimiter());
 app.use('/api/parcels/batch', createBatchRateLimiter());
 
-// --- 4. Body Parsing ---
-// Threat: Request smuggling, resource exhaustion via large payloads
-// Protection: 10MB JSON limit (enough for ~10,000 parcels, prevents abuse)
+// --- 5. Body Parsing ---
 app.use(express.json({ limit: '10mb' }));
 
-// --- 5. Input Sanitization ---
-// Threat: Prototype pollution via __proto__, constructor, prototype
-// Protection: Strip dangerous keys from all request bodies
+// --- 6. Input Sanitization ---
 app.use(sanitizeInput);
 
-// --- 6. Content-Type Enforcement ---
-// Threat: CSRF via form submissions, content-type confusion
-// Protection: Reject POST requests without application/json
+// --- 7. Content-Type Enforcement ---
 app.use('/api/parcels', requireJsonContentType);
+
+// --- 8. Request Logging ---
+app.use(requestLogger);
 
 // --- Routes ---
 app.use('/api/parcels', parcelRoutes);
 
-// --- Health check (no rate limiting, no auth) ---
+// --- Health check ---
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// --- Metrics endpoint ---
+// Returns operational metrics and department distribution
+app.get('/api/metrics', (_req, res) => {
+  res.json({
+    status: 'success',
+    data: getMetrics(),
+  });
+});
+
+// --- Anomaly check endpoint ---
+// Returns current health status and any active alerts
+app.get('/api/health/detailed', (_req, res) => {
+  const anomalyCheck = checkForAnomalies();
+  const statusCode = anomalyCheck.healthy ? 200 : 200; // Always 200; alerts are informational
+  res.status(statusCode).json({
+    status: 'success',
+    data: {
+      ...anomalyCheck,
+      metrics: getMetrics(),
+    },
+  });
 });
 
 // --- Error handling (must be last) ---
