@@ -300,4 +300,118 @@ describe('Routing Engine', () => {
       }).toThrow(/No department rule matched/);
     });
   });
+
+  // ===========================================================
+  // MANUAL REVIEW RULE (Phase 5 — New Rule Demonstration)
+  // ===========================================================
+  describe('Manual Review Approval', () => {
+    // Normal cases
+    it('should NOT require manual review for €100 parcel', () => {
+      const result = routeParcel(makeParcel({ value: 100 }));
+      const manualReview = result.approvals.find(a => a.type === 'Manual Review');
+      expect(manualReview).toBeUndefined();
+    });
+
+    it('should require manual review for €6000 parcel', () => {
+      const result = routeParcel(makeParcel({ value: 6000 }));
+      const manualReview = result.approvals.find(a => a.type === 'Manual Review');
+      expect(manualReview).toBeDefined();
+      expect(manualReview.reason).toContain('5,000');
+    });
+
+    // Boundary cases — per spec: €5000 → no review, €5001 → review
+    it('should NOT require manual review for exactly €5000 (boundary: >5000)', () => {
+      const result = routeParcel(makeParcel({ value: 5000 }));
+      const manualReview = result.approvals.find(a => a.type === 'Manual Review');
+      expect(manualReview).toBeUndefined();
+    });
+
+    it('should require manual review for €5000.01 (just above boundary)', () => {
+      const result = routeParcel(makeParcel({ value: 5000.01 }));
+      const manualReview = result.approvals.find(a => a.type === 'Manual Review');
+      expect(manualReview).toBeDefined();
+    });
+
+    it('should NOT require manual review for €4999.99 (just below boundary)', () => {
+      const result = routeParcel(makeParcel({ value: 4999.99 }));
+      const manualReview = result.approvals.find(a => a.type === 'Manual Review');
+      expect(manualReview).toBeUndefined();
+    });
+
+    // Combined: high-value parcels get BOTH insurance AND manual review
+    it('should require BOTH insurance and manual review for €6000 parcel', () => {
+      const result = routeParcel(makeParcel({ value: 6000 }));
+      expect(result.approvals).toHaveLength(2);
+      expect(result.approvals.map(a => a.type)).toEqual(['Insurance', 'Manual Review']);
+    });
+
+    // Between insurance and manual review thresholds
+    it('should require ONLY insurance (no manual review) for €3000 parcel', () => {
+      const result = routeParcel(makeParcel({ value: 3000 }));
+      expect(result.approvals).toHaveLength(1);
+      expect(result.approvals[0].type).toBe('Insurance');
+    });
+
+    // Full combination: heavy + high-value
+    it('should route 20kg + €8000 parcel to Heavy with Insurance + Manual Review', () => {
+      const result = routeParcel(makeParcel({ weight: 20, value: 8000 }));
+      expect(result.department).toBe('Heavy');
+      expect(result.approvals).toHaveLength(2);
+      expect(result.approvals.map(a => a.type)).toContain('Insurance');
+      expect(result.approvals.map(a => a.type)).toContain('Manual Review');
+    });
+
+    // Explainability
+    it('should include the manual review rule name', () => {
+      const result = routeParcel(makeParcel({ value: 6000 }));
+      const manualReview = result.approvals.find(a => a.type === 'Manual Review');
+      expect(manualReview.rule).toBe('manual-review-required');
+    });
+  });
+
+  // ===========================================================
+  // REGRESSION PROTECTION (Phase 5)
+  //
+  // These tests form a "regression snapshot" — they lock down
+  // the expected behavior of ALL current rules at key data points.
+  // If someone changes a rule threshold accidentally, at least one
+  // of these tests will fail immediately.
+  // ===========================================================
+  describe('Regression Snapshot — All Rules', () => {
+    const regressionCases = [
+      // format: [weight, value, expectedDept, expectedApprovals]
+      [0.1,  0,      'Mail',    []],
+      [0.5,  50,     'Mail',    []],
+      [1,    100,    'Mail',    []],
+      [1.001, 100,   'Regular', []],
+      [5,    500,    'Regular', []],
+      [10,   1000,   'Regular', []],
+      [10.001, 100,  'Heavy',   []],
+      [15,   100,    'Heavy',   []],
+      [100,  0,      'Heavy',   []],
+      // Insurance boundary
+      [5,    1000,   'Regular', []],
+      [5,    1000.01,'Regular', ['Insurance']],
+      [5,    2000,   'Regular', ['Insurance']],
+      // Manual Review boundary
+      [5,    5000,   'Regular', ['Insurance']],
+      [5,    5000.01,'Regular', ['Insurance', 'Manual Review']],
+      [5,    6000,   'Regular', ['Insurance', 'Manual Review']],
+      // Combined Heavy + approvals
+      [15,   5000.01, 'Heavy',  ['Insurance', 'Manual Review']],
+      [15,   100,     'Heavy',  []],
+      // Mail + high value
+      [0.5,  6000,   'Mail',    ['Insurance', 'Manual Review']],
+    ];
+
+    test.each(regressionCases)(
+      '%skg + €%s → %s, approvals: %j',
+      (weight, value, expectedDept, expectedApprovals) => {
+        const result = routeParcel(makeParcel({ weight, value }));
+        expect(result.department).toBe(expectedDept);
+        expect(result.approvals.map(a => a.type)).toEqual(expectedApprovals);
+      }
+    );
+  });
 });
+
