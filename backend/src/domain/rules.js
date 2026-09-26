@@ -75,6 +75,13 @@ const approvalRules = [
     reason: (parcel) =>
       `Parcel value (€${parcel.value}) exceeds €1,000.`,
   },
+  {
+    name: 'manual-review-required',
+    type: 'Manual Review',
+    condition: (parcel) => parcel.value > 5000,
+    reason: (parcel) =>
+      `Parcel value (€${parcel.value}) exceeds €5,000 and requires manual review.`,
+  },
 ];
 
 module.exports = {
