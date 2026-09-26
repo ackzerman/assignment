@@ -1,0 +1,46 @@
+{
+  "parcels": [
+    {
+      "weight": 0.5,
+      "value": 25,
+      "destinationCountry": "DE",
+      "additionalAttributes": { "fragile": true }
+    },
+    {
+      "weight": 3,
+      "value": 150,
+      "destinationCountry": "FR"
+    },
+    {
+      "weight": 15,
+      "value": 500,
+      "destinationCountry": "US"
+    },
+    {
+      "weight": -2,
+      "value": 100,
+      "destinationCountry": "DE"
+    },
+    {
+      "weight": 1,
+      "value": 2000,
+      "destinationCountry": "GB"
+    },
+    {
+      "weight": 7,
+      "value": 300,
+      "destinationCountry": "INVALID"
+    },
+    {
+      "weight": 0.1,
+      "value": 10,
+      "destinationCountry": "JP"
+    },
+    {
+      "weight": 25,
+      "value": 5000,
+      "destinationCountry": "AU",
+      "additionalAttributes": { "hazardous": true, "priority": "express" }
+    }
+  ]
+}

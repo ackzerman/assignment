@@ -12,7 +12,8 @@
 const express = require('express');
 const { validateParcelInput, getValidCountryCodes } = require('../../domain/validation');
 const { routeParcel } = require('../../domain/routingEngine');
-const { ValidationFailedError } = require('../../errors/AppError');
+const { processBatch, validateBatchInput } = require('../../domain/batchProcessor');
+const { ValidationFailedError, AppError } = require('../../errors/AppError');
 
 const router = express.Router();
 
@@ -86,4 +87,41 @@ router.get('/countries', (_req, res) => {
   });
 });
 
+/**
+ * POST /api/parcels/batch
+ *
+ * Processes a batch of parcels from a JSON upload.
+ *
+ * Expected body: { "parcels": [ { weight, value, destinationCountry, ... }, ... ] }
+ *
+ * Each parcel is validated and routed independently.
+ * Invalid parcels are reported with errors but don't block valid ones.
+ *
+ * Returns:
+ * {
+ *   summary: { total, successful, failed, processedAt },
+ *   results: [ { index, status, department?, errors?, ... }, ... ]
+ * }
+ */
+router.post('/batch', async (req, res, next) => {
+  try {
+    // Step 1: Validate the batch container
+    const batchValidation = validateBatchInput(req.body);
+    if (!batchValidation.valid) {
+      throw new AppError(batchValidation.error, 400);
+    }
+
+    // Step 2: Process each parcel (validate + route)
+    const result = await processBatch(batchValidation.parcels);
+
+    res.status(200).json({
+      status: 'success',
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;
+
