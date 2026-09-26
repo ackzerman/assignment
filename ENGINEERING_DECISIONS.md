@@ -1,6 +1,6 @@
 # Engineering & Architecture Decisions: Parcel Routing System
 
-This document provides a comprehensive, rigorous log of all architectural, logical, and engineering decisions made in the **Parcel Routing System** across Phase 1 (Foundation, Domain Model & Validation) and Phase 2 (Core Routing Engine & Extensible Rules).
+This document provides a comprehensive, rigorous log of all architectural, logical, and engineering decisions made in the **Parcel Routing System** across Phases 1–5 (Foundation, Routing Engine, Single Parcel UI, Batch Processing, Testing & Safe Rule Changes).
 
 For each decision, we outline:
 1. **Context & Problem Statement**: What problem needed to be solved and why it matters.
@@ -26,6 +26,10 @@ For each decision, we outline:
 11. [Decision 10: Explainability as a First-Class Output](#decision-10-explainability-as-a-first-class-output)
 12. [Decision 11: Testing Strategy & Regression Safety (Pure Domain Testing)](#decision-11-testing-strategy--regression-safety-pure-domain-testing)
 13. [Decision 12: Interview Debuggability Design (Debugging Scenario Readiness)](#decision-12-interview-debuggability-design-debugging-scenario-readiness)
+14. [Decision 13: Batch Processing Format (JSON vs XML)](#decision-13-batch-processing-format-json-vs-xml)
+15. [Decision 14: Batch Processing Architecture (Chunked Sync vs Job Queue)](#decision-14-batch-processing-architecture-chunked-sync-vs-job-queue)
+16. [Decision 15: New Rule Addition Workflow (Feature Branch → Merge)](#decision-15-new-rule-addition-workflow-feature-branch--merge)
+17. [Decision 16: Regression Testing Strategy (Parameterized Snapshot Table)](#decision-16-regression-testing-strategy-parameterized-snapshot-table)
 
 ---
 
@@ -508,3 +512,191 @@ Section 7 of the Technical Assessment states:
 | **10**| Explainability | Dynamic Reason Strings in Primary Output | Immediate operational clarity |
 | **11**| Testing | Pure Domain Unit Testing (72 tests) | 100% boundary coverage in <100ms |
 | **12**| Debuggability | Pure Predicate Functions | Fast reproduction and fix during interviews |
+| **13**| Batch Format | JSON over XML | Native JS parsing, simpler syntax, smaller files |
+| **14**| Batch Architecture | Chunked Sync Processing with Event Loop Yields | Right-sized for assessment, no external deps |
+| **15**| New Rule Workflow | Feature Branch → Tests → Merge (Git Workflow) | Safe, reviewable, documented process |
+| **16**| Regression Strategy | Parameterized Snapshot Table + Boundary Tests | 18 data points covering all rule interactions |
+
+---
+
+## Decision 13: Batch Processing Format (JSON vs XML)
+
+### Context & Problem Statement
+
+Phase 4 requires operators to upload parcel data in bulk. The spec says: "Choose JSON or XML. Prefer the format that provides the simplest appropriate solution and document the reasoning."
+
+### Alternatives Considered
+
+| Option | Description |
+|--------|-------------|
+| **JSON** | Native JavaScript object notation, parsed with `JSON.parse()` |
+| **XML** | Markup language, requires an external parser library (e.g., `xml2js`, `fast-xml-parser`) |
+
+### Trade-Off Matrix
+
+| Dimension | JSON | XML |
+|-----------|------|-----|
+| **Parse complexity** | Built-in (`JSON.parse()`) — zero dependencies | Requires external library |
+| **File size** | ~30-50% smaller (no closing tags) | Larger due to verbose tag syntax |
+| **Operator authoring** | Easy to create in any text editor | Requires careful tag matching |
+| **Error messages** | Clear (line/position in JSON) | Often cryptic XML parser errors |
+| **API consistency** | Matches existing POST /api/parcels/route format | Would require format translation |
+| **Ecosystem** | JavaScript's native format | Legacy enterprise format |
+| **Schema validation** | Can validate shape in JS | XSD adds complexity |
+
+### Chosen Decision & Rationale
+
+**JSON** — It is JavaScript's native data format. Using it means:
+- Zero external parsing dependencies (no `xml2js` or similar)
+- The batch file format matches the single-parcel API exactly
+- Operators familiar with the single-parcel form can understand the batch format
+- File sizes are 30-50% smaller than equivalent XML
+
+### Interview Talking Points
+- "I chose JSON because it eliminates an entire class of dependencies and matches our existing API contract."
+- "XML would add parsing complexity without any benefit for this use case."
+- "If we needed to integrate with enterprise systems that mandate XML, we could add an XML adapter without changing the batch processor itself."
+
+---
+
+## Decision 14: Batch Processing Architecture (Chunked Sync vs Job Queue)
+
+### Context & Problem Statement
+
+The spec requires: "Design batch processing so large files do not unnecessarily consume excessive memory." It also says: "Do not build a distributed job-processing platform unless the requirements actually justify it."
+
+### Alternatives Considered
+
+| Option | Description |
+|--------|-------------|
+| **A: Process entire array at once** | Parse full JSON, validate and route all parcels in one tight loop |
+| **B: Chunked synchronous with event loop yields** | Process in configurable chunks (default 100), yielding to event loop between chunks |
+| **C: Background job queue (Bull/Redis)** | Enqueue batch job, process asynchronously, poll for results |
+| **D: Streaming JSON parser (JSONStream)** | Parse large JSON files as a stream without loading the entire file into memory |
+
+### Trade-Off Matrix
+
+| Dimension | A (All at once) | B (Chunked) | C (Job queue) | D (Streaming) |
+|-----------|-----------------|-------------|---------------|----------------|
+| **Memory** | Entire array in memory | Entire array + chunked processing | Low (queue-based) | Very low |
+| **Complexity** | Trivial | Low | High (Redis, workers, polling) | Medium (stream callbacks) |
+| **Dependencies** | None | None | Bull, Redis | JSONStream |
+| **Responsiveness** | Blocks event loop for large batches | Yields between chunks | Non-blocking | Non-blocking |
+| **Progress reporting** | None possible | Easy (callback per chunk) | Requires polling | Possible but complex |
+| **Assessment fit** | Too naive | Right-sized ✓ | Overkill | Slightly over-engineered |
+
+### Chosen Decision & Rationale
+
+**Option B: Chunked synchronous processing** — This provides the right balance:
+- `setImmediate()` between chunks prevents blocking the event loop
+- Progress callback enables real-time UI updates
+- No external dependencies (no Redis, no Bull)
+- The JSON body is already parsed by Express (`express.json()` with a 10MB limit), so streaming the parser wouldn't save memory — the JSON is already in memory
+- Configurable chunk size (default 100, injectable for testing)
+
+### Key Implementation Details
+- `processBatch()` in `batchProcessor.js` accepts an `onProgress` callback
+- Each parcel is validated and routed independently (mixed-validity handling)
+- The `sanitizeInput()` function prevents huge payloads in error responses
+- `validateBatchInput()` rejects batches over 10,000 parcels as a safety limit
+
+### Interview Talking Points
+- "I chose chunked processing because the spec explicitly says not to build a job queue platform."
+- "The `setImmediate()` yield is a real Node.js pattern — it prevents event loop starvation for long batches."
+- "If batch sizes grow beyond 10MB, the next step would be streaming the JSON parser, but that's not needed at current scale."
+
+---
+
+## Decision 15: New Rule Addition Workflow (Feature Branch → Merge)
+
+### Context & Problem Statement
+
+Phase 5 requires demonstrating how to safely add a new rule (`Value > €5000 → Manual Review`) using a realistic Git workflow.
+
+### Workflow Executed
+
+```text
+master (Phase 4 complete, 95 tests passing)
+  ↓
+git checkout -b feature/manual-review-rule
+  ↓
+Add rule to rules.js (6 lines: name, type, condition, reason)
+  ↓
+Add 9 tests (boundary: €5000/€5000.01/€4999.99, combinations, explainability)
+  ↓
+Add 18 regression snapshot data points (parameterized test.each)
+  ↓
+Run full suite: 122 tests passing ✓
+  ↓
+git commit on feature branch
+  ↓
+git checkout master
+  ↓
+git merge --no-ff feature/manual-review-rule
+  ↓
+Final test run: 122 tests passing ✓
+```
+
+### Why This Demonstrates Safety
+
+1. **No engine changes needed** — Adding the rule only touched `rules.js` (6 lines) and the test file. The routing engine was completely untouched.
+2. **All existing tests still pass** — The 95 existing tests from Phases 1-4 were not modified and all passed with the new rule in place.
+3. **Feature branch isolation** — The new rule was developed in isolation, so a bad rule wouldn't break `master`.
+4. **No-fast-forward merge** — `--no-ff` preserves the branch history in the git graph, making the feature addition visible.
+
+### Interview Talking Points
+- "Adding the Manual Review rule required editing exactly ONE file (`rules.js`) and adding 6 lines. This validates the Open-Closed Principle from Decision 6."
+- "The existing 95 tests were not modified at all, proving the rule addition is non-breaking."
+- "The feature branch shows a realistic workflow — in production this would include a PR review."
+
+---
+
+## Decision 16: Regression Testing Strategy (Parameterized Snapshot Table)
+
+### Context & Problem Statement
+
+Phase 5 requires "regression protection" — tests that make it difficult for future rule changes to accidentally break existing behavior.
+
+### Alternatives Considered
+
+| Option | Description |
+|--------|-------------|
+| **A: Individual test cases per scenario** | Separate `it()` blocks for each scenario |
+| **B: Parameterized data table (`test.each`)** | Single test template with an array of input/expected-output rows |
+| **C: Jest snapshot testing** | Serialize routing results and compare to stored snapshots |
+
+### Trade-Off Matrix
+
+| Dimension | A (Individual) | B (Data Table) | C (Snapshots) |
+|-----------|----------------|----------------|---------------|
+| **Scanability** | Hard to see the full picture | One table shows all rules at a glance ✓ | Hidden in snapshot files |
+| **Adding cases** | Write new test function | Add one row to array ✓ | Auto-generated |
+| **Failure messages** | Generic assertion error | Shows exact input that broke ✓ | Diff of serialized output |
+| **False positives** | Unlikely | Unlikely | Common (timestamp changes, etc.) |
+| **Documentation value** | Moderate | High — reads like a specification ✓ | Low |
+
+### Chosen Decision & Rationale
+
+**Option B: Parameterized data table** — The regression snapshot in `routingEngine.test.js` is a `test.each()` with 18 data points:
+
+```javascript
+const regressionCases = [
+  // [weight, value, expectedDept, expectedApprovals]
+  [0.1,    0,       'Mail',    []],
+  [1,      100,     'Mail',    []],
+  [1.001,  100,     'Regular', []],
+  [10,     1000,    'Regular', []],
+  [10.001, 100,     'Heavy',   []],
+  [5,      1000.01, 'Regular', ['Insurance']],
+  [5,      5000.01, 'Regular', ['Insurance', 'Manual Review']],
+  // ... 11 more cases
+];
+```
+
+This is both a test AND documentation. Anyone reading this table can understand every rule in the system at a glance.
+
+### Interview Talking Points
+- "The regression table serves as living documentation — if you want to know what the system does for any input, look at this table."
+- "Adding a row takes 10 seconds. Removing a row would require an explicit decision to change expected behavior."
+- "Jest's `test.each` generates descriptive test names like `5kg + €5000.01 → Regular, approvals: ['Insurance', 'Manual Review']` — these read like a specification."
+
