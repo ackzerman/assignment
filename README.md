@@ -2,11 +2,13 @@
 
 An internal parcel routing system that processes parcels and routes them to the appropriate department based on configurable business rules.
 
+> 📘 **Comprehensive Architectural & Engineering Decisions**: For an in-depth breakdown of every design decision, trade-off matrix, alternatives considered, and interview talking points, see [ENGINEERING_DECISIONS.md](./ENGINEERING_DECISIONS.md).
+
 ## Tech Stack
 
 - **Backend:** Node.js + Express (JavaScript)
 - **Frontend:** React + Vite (JavaScript)
-- **Testing:** Jest
+- **Testing:** Jest (72 tests passing, 100% domain boundary coverage)
 
 ## Project Structure
 
@@ -14,21 +16,27 @@ An internal parcel routing system that processes parcels and routes them to the 
 assignment/
 ├── backend/                  # Node.js + Express API
 │   ├── src/
-│   │   ├── domain/           # Pure business logic (no framework dependencies)
+│   │   ├── domain/           # Pure business logic (zero framework dependencies)
 │   │   │   ├── parcel.js     # Parcel domain model documentation
-│   │   │   └── validation.js # Input validation logic
+│   │   │   ├── validation.js # Input validation logic & country code set
+│   │   │   ├── rules.js      # Business rules configuration (departments & approvals)
+│   │   │   └── routingEngine.js # Pure evaluation engine
 │   │   ├── errors/           # Custom error classes
 │   │   │   └── AppError.js   # AppError, ValidationFailedError
 │   │   ├── api/
 │   │   │   ├── routes/       # Express route handlers (thin HTTP layer)
-│   │   │   └── middleware/   # Error handling, etc.
-│   │   ├── app.js            # Express app configuration
+│   │   │   │   └── parcelRoutes.js
+│   │   │   └── middleware/   # Centralized error handling
+│   │   ├── app.js            # Express app configuration (testable without server)
 │   │   └── index.js          # Server entry point
 │   └── tests/
 │       └── domain/           # Unit tests for domain logic
-│           └── validation.test.js
+│           ├── validation.test.js    # 40 validation tests
+│           └── routingEngine.test.js # 32 routing engine & boundary tests
 ├── frontend/                 # React + Vite UI
-└── MASTER_PROMPT.md          # Assessment specification
+├── ENGINEERING_DECISIONS.md  # Comprehensive architecture decisions & trade-offs
+├── MASTER_PROMPT.md          # Technical assessment specification
+└── README.md
 ```
 
 ## Quick Start
@@ -39,7 +47,7 @@ assignment/
 cd backend
 npm install
 npm run dev        # Start development server (port 3001)
-npm test           # Run tests (40 passing)
+npm test           # Run 72 automated tests
 ```
 
 ### Frontend
@@ -50,42 +58,14 @@ npm install
 npm run dev        # Start development server (port 5173)
 ```
 
-## Architecture Decisions
+## Core Architecture Decisions Summary
 
-### Domain Layer Separation
-The core business logic (parcel model, validation, routing rules) lives in `src/domain/` with **zero dependencies** on Express, React, or any framework. This ensures:
-- Business logic can be tested without HTTP
-- Easy to reason about routing rules in isolation
-- Supports the debugging requirement (interview scenario)
+- **Pure Domain Core (Clean Architecture Lite):** Business logic (`validation.js`, `routingEngine.js`, `rules.js`) has **zero dependencies** on Express or external libraries. Pure functions allow testing without HTTP servers or mocks.
+- **Declarative Rule Objects & Injected Evaluator:** Rules in `rules.js` are separated from the engine in `routingEngine.js`. Adding a new department or approval rule touches only configuration, honoring the Open-Closed Principle.
+- **Bifurcated Rule Semantics:**
+  - *Department Rules:* First-match-wins sorted by explicit priority (models physical sorting bins).
+  - *Approval Rules:* Accumulate all matches (models policy and compliance requirements like Insurance).
+- **Error Accumulation:** Input validation checks all fields simultaneously so operators see every issue at once.
+- **Fail-Closed Safety:** If parcel attributes fall into an unmapped gap, the engine throws an invariant error rather than silently misrouting physical packages.
 
-### Validation Strategy
-- All fields validated independently, collecting **all** errors at once
-- Operators see every problem in one response, not one at a time
-- Pure functions with no side effects — easy to test and extend
-
-### Error Handling
-- `AppError`: distinguishes operational errors (user mistakes) from programming errors (bugs)
-- `ValidationFailedError`: carries structured field-level errors for the UI
-- Error middleware centralizes response formatting
-
-## How to Run
-
-```bash
-# Backend
-cd backend
-npm install
-npm run dev
-
-# Frontend (in a new terminal)
-cd frontend
-npm install
-npm run dev
-```
-
-## How to Test
-
-```bash
-cd backend
-npm test           # Run all tests
-npm run test:watch # Watch mode
-```
+*For full alternative comparisons and trade-offs, read [ENGINEERING_DECISIONS.md](./ENGINEERING_DECISIONS.md).*
