@@ -5,6 +5,8 @@
  * It catches all errors and returns a consistent JSON response.
  *
  * Design Decision:
+ * - Validation errors (ValidationFailedError): return structured field-level errors
+ * - JSON parse errors (SyntaxError): return 400 with helpful message
  * - Operational errors (AppError with isOperational=true): return error details to client
  * - Programming errors (unhandled exceptions): log full error, return generic 500 to client
  * - Never expose stack traces or internal details in production
@@ -23,6 +25,17 @@ function errorHandler(err, _req, res, _next) {
     return;
   }
 
+  // JSON parse errors — client sent malformed JSON
+  // Threat: Request smuggling / malformed input
+  // Protection: Return 400 with a helpful (but not revealing) message
+  if (err instanceof SyntaxError && err.message.includes('JSON')) {
+    res.status(400).json({
+      status: 'error',
+      message: 'Request body contains invalid JSON. Please check the format.',
+    });
+    return;
+  }
+
   // Known operational errors — safe to return message
   if (err instanceof AppError && err.isOperational) {
     res.status(err.statusCode).json({
@@ -33,6 +46,7 @@ function errorHandler(err, _req, res, _next) {
   }
 
   // Unknown/programming errors — log internally, return generic message
+  // SECURITY: Never expose stack traces, file paths, or internal details
   console.error('[UNHANDLED ERROR]', {
     name: err.name,
     message: err.message,
