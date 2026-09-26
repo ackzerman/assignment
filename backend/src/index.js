@@ -2,13 +2,11 @@
  * Server Entry Point
  *
  * Starts the Express server.
- * Separated from app.ts so tests can import the app without starting the server.
+ * Separated from app.js so tests can import the app without starting the server.
  */
 
-import app from './app';
-import dotenv from 'dotenv';
-
-dotenv.config();
+require('dotenv').config();
+const app = require('./app');
 
 const PORT = process.env.PORT || 3001;
 

@@ -10,15 +10,9 @@
  * - Never expose stack traces or internal details in production
  */
 
-import { Request, Response, NextFunction } from 'express';
-import { AppError, ValidationFailedError } from '../../errors/AppError';
+const { AppError, ValidationFailedError } = require('../../errors/AppError');
 
-export function errorHandler(
-  err: Error,
-  _req: Request,
-  res: Response,
-  _next: NextFunction
-): void {
+function errorHandler(err, _req, res, _next) {
   // Validation errors — return structured field-level errors
   if (err instanceof ValidationFailedError) {
     res.status(400).json({
@@ -51,3 +45,5 @@ export function errorHandler(
     message: 'An unexpected error occurred. Please try again later.',
   });
 }
+
+module.exports = { errorHandler };

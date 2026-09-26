@@ -2,14 +2,14 @@
  * Express Application Setup
  *
  * Configures middleware and routes.
- * Separated from index.ts so the app can be imported by tests
+ * Separated from index.js so the app can be imported by tests
  * without starting the server.
  */
 
-import express from 'express';
-import cors from 'cors';
-import parcelRoutes from './api/routes/parcelRoutes';
-import { errorHandler } from './api/middleware/errorHandler';
+const express = require('express');
+const cors = require('cors');
+const parcelRoutes = require('./api/routes/parcelRoutes');
+const { errorHandler } = require('./api/middleware/errorHandler');
 
 const app = express();
 
@@ -28,4 +28,4 @@ app.get('/api/health', (_req, res) => {
 // --- Error handling (must be last) ---
 app.use(errorHandler);
 
-export default app;
+module.exports = app;

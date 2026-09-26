@@ -2,26 +2,32 @@
 
 An internal parcel routing system that processes parcels and routes them to the appropriate department based on configurable business rules.
 
+## Tech Stack
+
+- **Backend:** Node.js + Express (JavaScript)
+- **Frontend:** React + Vite (JavaScript)
+- **Testing:** Jest
+
 ## Project Structure
 
 ```
 assignment/
-├── backend/                  # Node.js + Express + TypeScript API
+├── backend/                  # Node.js + Express API
 │   ├── src/
 │   │   ├── domain/           # Pure business logic (no framework dependencies)
-│   │   │   ├── parcel.ts     # Parcel domain model & types
-│   │   │   └── validation.ts # Input validation logic
+│   │   │   ├── parcel.js     # Parcel domain model documentation
+│   │   │   └── validation.js # Input validation logic
 │   │   ├── errors/           # Custom error classes
-│   │   │   └── AppError.ts   # AppError, ValidationFailedError
+│   │   │   └── AppError.js   # AppError, ValidationFailedError
 │   │   ├── api/
 │   │   │   ├── routes/       # Express route handlers (thin HTTP layer)
 │   │   │   └── middleware/   # Error handling, etc.
-│   │   ├── app.ts            # Express app configuration
-│   │   └── index.ts          # Server entry point
+│   │   ├── app.js            # Express app configuration
+│   │   └── index.js          # Server entry point
 │   └── tests/
 │       └── domain/           # Unit tests for domain logic
-│           └── validation.test.ts
-├── frontend/                 # React + Vite + TypeScript UI
+│           └── validation.test.js
+├── frontend/                 # React + Vite UI
 └── MASTER_PROMPT.md          # Assessment specification
 ```
 
@@ -33,7 +39,7 @@ assignment/
 cd backend
 npm install
 npm run dev        # Start development server (port 3001)
-npm test           # Run tests
+npm test           # Run tests (40 passing)
 ```
 
 ### Frontend

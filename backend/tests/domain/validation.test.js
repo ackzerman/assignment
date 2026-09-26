@@ -11,19 +11,17 @@
  * - Edge cases
  */
 
-import { validateParcelInput } from '../../src/domain/validation';
+const { validateParcelInput } = require('../../src/domain/validation');
 
 // --- Helper to assert validation failure ---
-function expectFailure(input: Record<string, unknown>, expectedField: string) {
+function expectFailure(input, expectedField) {
   const result = validateParcelInput(input);
   expect(result.success).toBe(false);
-  if (!result.success) {
-    expect(result.errors.some((e) => e.field === expectedField)).toBe(true);
-  }
+  expect(result.errors.some((e) => e.field === expectedField)).toBe(true);
 }
 
 // --- Helper to assert validation success ---
-function expectSuccess(input: Record<string, unknown>) {
+function expectSuccess(input) {
   const result = validateParcelInput(input);
   expect(result.success).toBe(true);
   return result;
@@ -44,11 +42,9 @@ describe('Parcel Validation', () => {
   describe('Valid Inputs', () => {
     it('should accept a valid parcel with all fields', () => {
       const result = expectSuccess(VALID_INPUT);
-      if (result.success) {
-        expect(result.parcel.weight).toBe(5);
-        expect(result.parcel.value).toBe(100);
-        expect(result.parcel.destinationCountry).toBe('DE');
-      }
+      expect(result.parcel.weight).toBe(5);
+      expect(result.parcel.value).toBe(100);
+      expect(result.parcel.destinationCountry).toBe('DE');
     });
 
     it('should accept a parcel without additionalAttributes', () => {
@@ -57,9 +53,7 @@ describe('Parcel Validation', () => {
         value: 0,
         destinationCountry: 'US',
       });
-      if (result.success) {
-        expect(result.parcel.additionalAttributes).toEqual({});
-      }
+      expect(result.parcel.additionalAttributes).toEqual({});
     });
 
     it('should accept a parcel with value of 0', () => {
@@ -71,27 +65,21 @@ describe('Parcel Validation', () => {
         ...VALID_INPUT,
         additionalAttributes: { fragile: true, priority: 'high', floor: 3 },
       });
-      if (result.success) {
-        expect(result.parcel.additionalAttributes).toEqual({
-          fragile: true,
-          priority: 'high',
-          floor: 3,
-        });
-      }
+      expect(result.parcel.additionalAttributes).toEqual({
+        fragile: true,
+        priority: 'high',
+        floor: 3,
+      });
     });
 
     it('should accept country codes case-insensitively', () => {
       const result = expectSuccess({ ...VALID_INPUT, destinationCountry: 'de' });
-      if (result.success) {
-        expect(result.parcel.destinationCountry).toBe('DE'); // Normalized to uppercase
-      }
+      expect(result.parcel.destinationCountry).toBe('DE'); // Normalized to uppercase
     });
 
     it('should trim and normalize country codes', () => {
       const result = expectSuccess({ ...VALID_INPUT, destinationCountry: '  fr  ' });
-      if (result.success) {
-        expect(result.parcel.destinationCountry).toBe('FR');
-      }
+      expect(result.parcel.destinationCountry).toBe('FR');
     });
   });
 
@@ -137,9 +125,7 @@ describe('Parcel Validation', () => {
 
     it('should accept weight as numeric string', () => {
       const result = expectSuccess({ ...VALID_INPUT, weight: '5.5' });
-      if (result.success) {
-        expect(result.parcel.weight).toBe(5.5);
-      }
+      expect(result.parcel.weight).toBe(5.5);
     });
   });
 
@@ -168,18 +154,16 @@ describe('Parcel Validation', () => {
     });
 
     it('should reject value exceeding €1,000,000', () => {
-      expectFailure({ ...VALID_INPUT, value: 1_000_001 }, 'value');
+      expectFailure({ ...VALID_INPUT, value: 1000001 }, 'value');
     });
 
     it('should accept value at upper bound (€1,000,000)', () => {
-      expectSuccess({ ...VALID_INPUT, value: 1_000_000 });
+      expectSuccess({ ...VALID_INPUT, value: 1000000 });
     });
 
     it('should accept value as numeric string', () => {
       const result = expectSuccess({ ...VALID_INPUT, value: '250.50' });
-      if (result.success) {
-        expect(result.parcel.value).toBe(250.5);
-      }
+      expect(result.parcel.value).toBe(250.5);
     });
   });
 
@@ -256,9 +240,7 @@ describe('Parcel Validation', () => {
         additionalAttributes: { nested: { key: 'value' } },
       });
       expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.errors.some((e) => e.field === 'additionalAttributes.nested')).toBe(true);
-      }
+      expect(result.errors.some((e) => e.field === 'additionalAttributes.nested')).toBe(true);
     });
 
     it('should reject null values in attributes', () => {
@@ -282,22 +264,17 @@ describe('Parcel Validation', () => {
       });
 
       expect(result.success).toBe(false);
-      if (!result.success) {
-        // Should have errors for weight, value, AND country
-        const errorFields = result.errors.map((e) => e.field);
-        expect(errorFields).toContain('weight');
-        expect(errorFields).toContain('value');
-        expect(errorFields).toContain('destinationCountry');
-      }
+      // Should have errors for weight, value, AND country
+      const errorFields = result.errors.map((e) => e.field);
+      expect(errorFields).toContain('weight');
+      expect(errorFields).toContain('value');
+      expect(errorFields).toContain('destinationCountry');
     });
 
     it('should report errors for completely empty input', () => {
       const result = validateParcelInput({});
-
       expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.errors.length).toBeGreaterThanOrEqual(3); // weight, value, country
-      }
+      expect(result.errors.length).toBeGreaterThanOrEqual(3); // weight, value, country
     });
   });
 });

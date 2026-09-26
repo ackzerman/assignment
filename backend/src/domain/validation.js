@@ -14,8 +14,6 @@
  * - Extensibility: adding a new field validation is straightforward
  */
 
-import { ParcelInput, Parcel, ValidationResult, ValidationError } from './parcel';
-
 // --- Valid country codes (ISO 3166-1 alpha-2) ---
 // Using a Set for O(1) lookups.
 // In a production system, this could come from configuration or an external service.
@@ -30,11 +28,14 @@ const VALID_COUNTRY_CODES = new Set([
 /**
  * Validates raw parcel input and returns either a valid Parcel or a list of errors.
  *
+ * @param {object} input - Raw parcel data from the API/UI
+ * @returns {{ success: true, parcel: object } | { success: false, errors: Array }}
+ *
  * This is the single entry point for validation — the API layer calls this
  * and the routing engine can trust that any Parcel it receives is valid.
  */
-export function validateParcelInput(input: ParcelInput): ValidationResult {
-  const errors: ValidationError[] = [];
+function validateParcelInput(input) {
+  const errors = [];
 
   const weight = validateWeight(input.weight, errors);
   const value = validateValue(input.value, errors);
@@ -45,15 +46,13 @@ export function validateParcelInput(input: ParcelInput): ValidationResult {
     return { success: false, errors };
   }
 
-  // At this point, all validations passed, so the values are guaranteed to be defined.
-  // TypeScript can't infer this from the error-check pattern, so we assert.
   return {
     success: true,
     parcel: {
-      weight: weight as number,
-      value: value as number,
-      destinationCountry: destinationCountry as string,
-      additionalAttributes: additionalAttributes as Record<string, string | number | boolean>,
+      weight,
+      value,
+      destinationCountry,
+      additionalAttributes,
     },
   };
 }
@@ -64,7 +63,7 @@ export function validateParcelInput(input: ParcelInput): ValidationResult {
  * Weight must be a positive number (> 0).
  * Rejects: missing, non-numeric, zero, negative.
  */
-function validateWeight(weight: unknown, errors: ValidationError[]): number | undefined {
+function validateWeight(weight, errors) {
   if (weight === undefined || weight === null) {
     errors.push({ field: 'weight', message: 'Weight is required.' });
     return undefined;
@@ -108,7 +107,7 @@ function validateWeight(weight: unknown, errors: ValidationError[]): number | un
  * Rejects: missing, non-numeric, negative.
  * Zero is valid (a parcel can have no declared value).
  */
-function validateValue(value: unknown, errors: ValidationError[]): number | undefined {
+function validateValue(value, errors) {
   if (value === undefined || value === null) {
     errors.push({ field: 'value', message: 'Value is required.' });
     return undefined;
@@ -135,7 +134,7 @@ function validateValue(value: unknown, errors: ValidationError[]): number | unde
   }
 
   // Upper bound to prevent unreasonable values
-  if (parsed > 1_000_000) {
+  if (parsed > 1000000) {
     errors.push({
       field: 'value',
       message: 'Value must not exceed €1,000,000.',
@@ -151,10 +150,7 @@ function validateValue(value: unknown, errors: ValidationError[]): number | unde
  * Destination country must be a non-empty string matching a known country code.
  * Case-insensitive: "de", "De", "DE" all accepted as "DE".
  */
-function validateDestinationCountry(
-  country: unknown,
-  errors: ValidationError[]
-): string | undefined {
+function validateDestinationCountry(country, errors) {
   if (country === undefined || country === null) {
     errors.push({ field: 'destinationCountry', message: 'Destination country is required.' });
     return undefined;
@@ -197,10 +193,7 @@ function validateDestinationCountry(
  * If provided, must be a plain object with string keys and string/number/boolean values.
  * Rejects: arrays, nested objects, functions.
  */
-function validateAdditionalAttributes(
-  attrs: unknown,
-  errors: ValidationError[]
-): Record<string, string | number | boolean> {
+function validateAdditionalAttributes(attrs, errors) {
   // Not provided — valid, default to empty object
   if (attrs === undefined || attrs === null) {
     return {};
@@ -215,10 +208,9 @@ function validateAdditionalAttributes(
     return {};
   }
 
-  const result: Record<string, string | number | boolean> = {};
-  const obj = attrs as Record<string, unknown>;
+  const result = {};
 
-  for (const [key, val] of Object.entries(obj)) {
+  for (const [key, val] of Object.entries(attrs)) {
     if (typeof val !== 'string' && typeof val !== 'number' && typeof val !== 'boolean') {
       errors.push({
         field: `additionalAttributes.${key}`,
@@ -237,6 +229,11 @@ function validateAdditionalAttributes(
  * Returns the set of valid country codes.
  * Useful for the frontend to populate a dropdown.
  */
-export function getValidCountryCodes(): string[] {
+function getValidCountryCodes() {
   return Array.from(VALID_COUNTRY_CODES).sort();
 }
+
+module.exports = {
+  validateParcelInput,
+  getValidCountryCodes,
+};
