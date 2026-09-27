@@ -1,10 +1,10 @@
 /**
  * Rate-limit scope: strict batch-CREATION limiting must not throttle
- * legitimate GET status/results polling (Bug 1 regression tests).
+ * legitimate GET status/results polling.
  *
- * - POST /api/batches → strict 10-per-15min limiter still enforced.
+ * - POST /api/batches → strict 30-per-10min limiter still enforced.
  * - GET /api/batches/:batchId (polled ~1/sec by the UI) and
- *   GET /api/batches/:batchId/results → general limiter only.
+ *   GET /api/batches/:batchId/results → dedicated polling limiter only.
  */
 
 jest.mock('../../src/infrastructure/queue', () => {
@@ -52,8 +52,8 @@ describe('Rate-limit scope', () => {
   });
 
   it('POST /api/batches remains protected by the strict batch limit', async () => {
-    // One creation already consumed above: 9 more succeed, the 11th 429s.
-    for (let i = 0; i < 9; i++) {
+    // One creation already consumed above: 29 more succeed, the 31st 429s.
+    for (let i = 0; i < 29; i++) {
       const res = await request(app).post('/api/batches').send(oneParcel());
       expect(res.status).toBe(202);
     }

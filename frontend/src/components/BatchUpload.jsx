@@ -24,8 +24,13 @@ import { createBatch, pollBatchStatus, fetchBatchResults, isAbortError } from '.
  *    The actual validation of each parcel still happens server-side.
  */
 
-// Maximum file size: 10MB (matches backend's express.json limit)
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
+// Maximum upload file size: 9 MB — deliberately BELOW the backend's ~10 MB
+// JSON body limit. The file is wrapped in {"parcels": [...]} before sending,
+// so a file at exactly 10 MB would always exceed the server limit and 413.
+// The 1 MB margin absorbs envelope overhead; the backend remains
+// authoritative and still 413s anything over its own limit.
+const MAX_FILE_SIZE = 9 * 1024 * 1024;
+const MAX_FILE_SIZE_MB = 9;
 
 export default function BatchUpload({ onBatchResult, onError, onClear }) {
   const [file, setFile] = useState(null);
@@ -44,10 +49,20 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
   // background polling can never update a dead component or a replaced batch.
   // Aborts are silent — they are user navigation, not application errors.
   const abortRef = useRef(null);
+  // Active FileReader: aborted on unmount or when a newer file supersedes it,
+  // so stale read callbacks can never mutate current component state.
+  const readerRef = useRef(null);
+  // Monotonic generation: every handleFile bumps it; reader callbacks check
+  // their generation and no-op when stale (replaced file or unmount).
+  const fileGenRef = useRef(0);
 
-  // Abort any in-flight batch flow when this component unmounts
-  // (tab switch / navigation). Prevents leaked polling and stale UI updates.
+  // Abort any in-flight batch flow AND file read when this component unmounts
+  // (tab switch / navigation). Prevents leaked polling, leaked reads, and
+  // stale UI updates.
   useEffect(() => () => {
+    fileGenRef.current++;
+    readerRef.current?.abort();
+    readerRef.current = null;
     abortRef.current?.abort();
     abortRef.current = null;
   }, []);
@@ -57,6 +72,12 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
    * Validates structure before sending to the backend.
    */
   function handleFile(selectedFile) {
+    // A newer file supersedes any in-flight read: abort it and invalidate
+    // its callbacks before touching state.
+    fileGenRef.current++;
+    readerRef.current?.abort();
+    readerRef.current = null;
+
     // Reset state
     setParseError(null);
     setParcels(null);
@@ -69,10 +90,11 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
       return;
     }
 
-    // Validate file size
+    // Validate file size (client ceiling sits below the server body limit
+    // so predictable 413s are rejected early with a clear message).
     if (selectedFile.size > MAX_FILE_SIZE) {
       setParseError(
-        `File is too large (${(selectedFile.size / 1024 / 1024).toFixed(1)} MB). Maximum size is ${MAX_FILE_SIZE / 1024 / 1024} MB.`
+        `File is too large (${(selectedFile.size / 1024 / 1024).toFixed(1)} MB). Maximum size is ${MAX_FILE_SIZE_MB} MB (below the server's 10 MB request limit, leaving room for the upload envelope).`
       );
       setFile(null);
       return;
@@ -80,10 +102,15 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
 
     setFile(selectedFile);
 
-    // Read and parse the file
+    // Read and parse the file. The generation captured here lets stale
+    // readers (aborted or superseded) no-op instead of mutating state.
+    const generation = fileGenRef.current;
     const reader = new FileReader();
+    readerRef.current = reader;
 
     reader.onload = (e) => {
+      if (fileGenRef.current !== generation) return; // Stale: superseded/unmounted.
+      readerRef.current = null;
       try {
         const data = JSON.parse(e.target.result);
 
@@ -116,7 +143,15 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
     };
 
     reader.onerror = () => {
+      if (fileGenRef.current !== generation) return; // Stale: silent, not an error.
+      readerRef.current = null;
+      // Intentional aborts (unmount / newer file) are silent by design.
+      if (reader.error?.name === 'AbortError') return;
       setParseError('Failed to read file. Please try again.');
+    };
+
+    reader.onabort = () => {
+      if (readerRef.current === reader) readerRef.current = null;
     };
 
     reader.readAsText(selectedFile);
@@ -241,7 +276,7 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
             <p className="drop-zone-text">
               Drag and drop a JSON file here, or <span className="drop-zone-link">browse</span>
             </p>
-            <p className="drop-zone-hint">Supports .json files up to 10 MB</p>
+            <p className="drop-zone-hint">Supports .json files up to {MAX_FILE_SIZE_MB} MB</p>
           </>
         ) : (
           <>
@@ -285,16 +320,23 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
         </div>
       )}
 
-      {/* Async progress (Master Phase 8: poll status, show progress) */}
+      {/* Async progress (Master Phase 8: poll status, show progress).
+          The raw batch UUID is never the title — it renders only as a
+          secondary reference below the human-readable status. */}
       {processing && progress && (
         <div className="batch-progress">
           <p>
-            Batch {progress.batchId || ''} — {progress.status}
+            <strong>Batch Processing</strong>
+            <br />
+            Status: {progress.status}
             {typeof progress.processed === 'number' && typeof progress.total === 'number' && (
               <> · {progress.processed.toLocaleString()} / {progress.total.toLocaleString()} processed</>
             )}
             {typeof progress.progress === 'number' && <> · {progress.progress}%</>}
           </p>
+          {progress.batchId && (
+            <p className="batch-reference">Reference: {progress.batchId}</p>
+          )}
           {typeof progress.progress === 'number' && (
             <progress value={progress.progress} max="100" style={{ width: '100%' }} />
           )}

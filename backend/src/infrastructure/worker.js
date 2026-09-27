@@ -34,11 +34,11 @@ const { routeParcel } = require('../domain/routingEngine');
 // Namespace import so tests can inject failures via jest.spyOn(store, ...).
 const store = require('./batchStore');
 const { logger } = require('../observability/logger');
-const { recordRouting, recordFailure, recordBatch, recordError, recordJobCompleted, recordJobFailed, recordJobRetry, workerJobStarted, workerJobFinished } = require('../observability/metrics');
+const { recordRouting, recordFailure, recordBatch, recordTerminalBatch, recordError, recordJobCompleted, recordJobFailed, recordJobRetry, workerJobStarted, workerJobFinished } = require('../observability/metrics');
 const { QUEUE_NAME, DEFAULT_REDIS_CONFIG } = require('./queue');
 const { positiveIntOrDefault } = require('../config');
 
-const DEFAULT_CHUNK_SIZE = parseInt(process.env.BATCH_CHUNK_SIZE || '500', 10) || 500;
+const DEFAULT_CHUNK_SIZE = positiveIntOrDefault(process.env.BATCH_CHUNK_SIZE, 500);
 const DEFAULT_CHUNK_LEASE_MS = positiveIntOrDefault(process.env.CHUNK_LEASE_MS, 300000);
 
 let worker = null;
@@ -62,6 +62,11 @@ function createWorker(options = {}) {
       workerJobStarted();
       const started = Date.now();
       try {
+        // Job-execution duration only: a single BullMQ execution can finish
+        // while other workers still own chunks, so this is NOT the full
+        // batch duration. Terminal batch duration is recorded separately by
+        // processBatchJob via recordTerminalBatch, only on the atomic
+        // QUEUED/PROCESSING → COMPLETED transition.
         const result = await processBatchJob(job, { leaseMs: DEFAULT_CHUNK_LEASE_MS });
         recordJobCompleted(Date.now() - started);
         return result;
@@ -192,12 +197,29 @@ async function processBatchJob(job, options = {}) {
     throw new Error(`Batch state not found for batchId: ${batchId}`);
   }
 
-  // Step 2: Mark batch as PROCESSING on first execution only.
-  if (batch.status === 'QUEUED') {
-    await store.setBatchStatus(batchId, 'PROCESSING', {
-      startedAt: new Date().toISOString(),
+  // Step 2: Enter PROCESSING atomically. QUEUED → PROCESSING happens only
+  // via tryMarkBatchProcessing (single Lua script): a stale execution that
+  // read QUEUED earlier but arrives after another execution already
+  // finalized the batch can never resurrect it. Terminal batches return
+  // their current state immediately without touching any chunk.
+  if (batch.status === 'COMPLETED' || batch.status === 'COMPLETED_WITH_ERRORS' || batch.status === 'FAILED') {
+    logger.info('Batch already terminal; stale execution stands down', {
+      jobId: job.id,
+      batchId,
+      status: batch.status,
     });
+    return {
+      batchId,
+      status: batch.status,
+      total: batch.total,
+      successful: batch.successful,
+      failed: batch.failed,
+    };
   }
+  // Best-effort transition: true when WE moved QUEUED → PROCESSING; false
+  // when already PROCESSING (retry path — chunk checkpoints arbitrate work).
+  // Never throws for terminal states (we returned above).
+  await store.tryMarkBatchProcessing(batchId);
 
   // Step 3: Claim → process → checkpoint loop. DONE chunks are skipped, so a
   // retry never recomputes checkpointed work. Unexpected failures release our
@@ -347,6 +369,12 @@ async function processBatchJob(job, options = {}) {
       // Re-read so batch metrics match the committed final state.
       const fresh = await store.getBatchState(batchId);
       recordBatch({ total: fresh.total, successful: fresh.successful, failed: fresh.failed });
+      // Terminal batch duration (full QUEUED-or-PROCESSING → terminal wall
+      // time) is recorded ONLY here, by the single execution that performed
+      // the atomic transition — never per job execution, so retries and
+      // concurrent workers cannot double-count it. Distinct from the
+      // per-execution job duration recorded by the BullMQ wrapper above.
+      recordTerminalBatch(terminalDurationMs(fresh));
 
       const summary = {
         batchId,
@@ -393,6 +421,19 @@ async function processBatchJob(job, options = {}) {
     totalChunks,
     completedChunks,
   };
+}
+
+/**
+ * Wall time from batch start (startedAt, else createdAt) to completion.
+ * Returns undefined when timestamps are missing/unparseable — the metric
+ * records the completion count regardless (duration only when measurable).
+ */
+function terminalDurationMs(state) {
+  if (!state || !state.completedAt) return undefined;
+  const end = Date.parse(state.completedAt);
+  const start = Date.parse(state.startedAt || state.createdAt || '');
+  if (!Number.isFinite(end) || !Number.isFinite(start) || end < start) return undefined;
+  return end - start;
 }
 
 /**

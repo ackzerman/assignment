@@ -106,4 +106,29 @@ describe('RoutingResult approvals (generic, data-driven)', () => {
     expect(screen.getAllByText('Required')).toHaveLength(1);
     expect(container.querySelector('.approvals-list').textContent).not.toContain('✓');
   });
+
+  it('a synthetic future approval type renders generically with a bold Required badge', () => {
+    const { container } = render(
+      <RoutingResult
+        result={parcelResult({
+          requiresApproval: true,
+          approvals: [{ type: 'Quantum Clearance', reason: 'Parcel exhibits quantum tunneling.' }],
+        })}
+      />,
+    );
+    // Approval type itself is a colored badge (same treatment as departments).
+    const badge = badgeWith('Quantum Clearance');
+    expect(badge).toBeTruthy();
+    expect(badge.className).toContain('dept-badge-sm');
+    // Required is its own separate badge carrying the required class.
+    const required = screen.getAllByText('Required');
+    expect(required).toHaveLength(1);
+    expect(required[0].tagName).toBe('SPAN');
+    expect(required[0].className).toContain('approval-badge');
+    expect(required[0].className).toContain('required');
+    // Reason sits underneath as separate text.
+    expect(screen.getByText('Parcel exhibits quantum tunneling.')).toBeTruthy();
+    // Never a checkmark.
+    expect(container.querySelector('.approvals-list').textContent).not.toContain('✓');
+  });
 });

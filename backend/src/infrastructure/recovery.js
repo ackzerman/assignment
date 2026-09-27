@@ -22,14 +22,28 @@
  */
 
 const { logger } = require('../observability/logger');
+const { positiveIntOrDefault } = require('../config');
 
 // Batches newer than this are left alone: their enqueue may still be in
 // flight from a concurrent creator.
 const DEFAULT_RECOVERY_GRACE_MS = 60 * 1000;
 
+// How often the periodic reconciliation re-runs (see startPeriodicRecovery).
+// Hourly grace-scale: orphaned batches become eligible 60s after creation,
+// so a 60s interval guarantees eventual recovery within ~2 minutes.
+const DEFAULT_RECOVERY_INTERVAL_MS = 60 * 1000;
+
+function getRecoveryGraceMs() {
+  return positiveIntOrDefault(process.env.RECOVERY_GRACE_MS, DEFAULT_RECOVERY_GRACE_MS);
+}
+
+function getRecoveryIntervalMs() {
+  return positiveIntOrDefault(process.env.RECOVERY_INTERVAL_MS, DEFAULT_RECOVERY_INTERVAL_MS);
+}
+
 async function recoverOrphanedBatches(options = {}) {
   const {
-    graceMs = DEFAULT_RECOVERY_GRACE_MS,
+    graceMs = getRecoveryGraceMs(),
     now = Date.now(),
     batchStore = require('./batchStore'),
     queueModule = require('./queue'),
@@ -86,5 +100,56 @@ async function recoverOrphanedBatches(options = {}) {
 
 module.exports = {
   recoverOrphanedBatches,
+  startPeriodicRecovery,
+  stopPeriodicRecovery,
+  getRecoveryGraceMs,
+  getRecoveryIntervalMs,
   DEFAULT_RECOVERY_GRACE_MS,
+  DEFAULT_RECOVERY_INTERVAL_MS,
 };
+
+/**
+ * Starts periodic orphan reconciliation: re-runs recoverOrphanedBatches on
+ * an interval so batches that were still inside the grace period at startup
+ * (e.g. crash 20s before restart with a 60s grace) are eventually recovered
+ * once they age out — instead of lingering QUEUED until TTL expiry.
+ *
+ * Safety is identical to the startup pass: only old QUEUED batches with no
+ * queue job are re-enqueued; terminal batches are never touched; duplicate
+ * execution is absorbed by idempotent checkpoints/HSETNX results.
+ *
+ * @param {object} [options]
+ * @param {number} [options.intervalMs] - Reconciliation period
+ * @param {number} [options.graceMs] - Minimum batch age to recover
+ * @param {object} [options.deps] - Injected { batchStore, queueModule, log }
+ * @returns {{ stop: Function }} Handle to stop the interval
+ */
+function startPeriodicRecovery(options = {}) {
+  const {
+    intervalMs = getRecoveryIntervalMs(),
+    graceMs = getRecoveryGraceMs(),
+    deps = {},
+  } = options;
+
+  const timer = setInterval(() => {
+    recoverOrphanedBatches({ graceMs, ...deps }).catch((err) => {
+      logger.warn('Periodic orphan recovery failed', { error: err.message });
+    });
+  }, intervalMs);
+
+  // Don't keep the process alive for reconciliation alone.
+  if (typeof timer.unref === 'function') timer.unref();
+
+  return {
+    stop() {
+      clearInterval(timer);
+    },
+  };
+}
+
+/**
+ * Stops a periodic recovery handle created by startPeriodicRecovery.
+ */
+function stopPeriodicRecovery(handle) {
+  if (handle && typeof handle.stop === 'function') handle.stop();
+}

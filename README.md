@@ -9,7 +9,7 @@ A public parcel routing system that processes parcels and routes them to the app
 - **Backend:** Node.js + Express (JavaScript)
 - **Queue + temporary state:** BullMQ + Redis (`ioredis`)
 - **Frontend:** React + Vite (JavaScript)
-- **Testing:** Jest (backend, 23 suites / 301 tests, Redis state via `ioredis-mock`) + Vitest (frontend, 8 files / 42 tests, jsdom)
+- **Testing:** Jest (backend, 28 suites / 364 tests, Redis state via `ioredis-mock`) + Vitest (frontend, 9 files / 50 tests, jsdom)
 
 ## Project Structure
 
@@ -53,7 +53,7 @@ assignment/
 cd backend
 npm install
 npm run dev        # Start development server (port 3001)
-npm test           # Run 301 automated backend tests (23 suites)
+npm test           # Run 364 automated backend tests (28 suites)
 ```
 
 ### Frontend
@@ -62,7 +62,7 @@ npm test           # Run 301 automated backend tests (23 suites)
 cd frontend
 npm install
 npm run dev        # Start development server (port 5173)
-npm test           # Run 42 frontend unit tests (vitest: pagination, API client, components)
+npm test           # Run 50 frontend unit tests (vitest: pagination, API client, components)
 ```
 
 ## API Contracts
@@ -72,23 +72,30 @@ npm test           # Run 42 frontend unit tests (vitest: pagination, API client,
 | `POST` | `/api/parcels` | Single parcel, sync, `200` + `{ parcelId, department, approvals, matchedRules, reasons }` |
 | `POST` | `/api/batches` | Create batch, async, `202` + `{ batchId, status: QUEUED }` (full-UUID `BATCH-<uuid>`) |
 | `GET` | `/api/batches/:batchId` | Poll progress `{ status, total, processed, successful, failed, progress }` (404 when unknown/expired) |
-| `GET` | `/api/batches/:batchId/results` | Temporary results, paginated (`?limit&offset`, limit capped server-side) |
+| `GET` | `/api/batches/:batchId/results` | Temporary results, paginated (`?limit&offset`, strictly validated, limit capped server-side, malformed values → `400`) |
 | `GET` | `/health/live` | Liveness: is the process alive? |
 | `GET` | `/health/ready` | Readiness: Redis + queue reachable? |
-| `GET` | `/api/metrics` | Counters: HTTP, routing, jobs, queue depth, latencies |
+| `GET` | `/api/metrics` | Counters: HTTP, routing, jobs, queue depth, job-execution vs terminal-batch latencies |
 
-Legacy alias kept: `POST /api/parcels/route` (single). There is exactly one batch implementation (`POST /api/batches` → BullMQ → worker).
+Legacy alias kept: `POST /api/parcels/route` (single). There is exactly one batch implementation (`POST /api/batches` → BullMQ → worker). Requests over the 10 MB JSON body limit get `413` (never `500`).
 
 ## Configuration (`backend/.env.example`)
 
 - `REDIS_URL` (preferred) or `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` — BullMQ queue + temporary batch state. Redis is never publicly exposed (localhost/private network + password in production).
+- Rate limiting (independent windows; invalid values fall back safely):
+  - `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` (defaults `900000` / `300`) — general API, 300 / 15 min.
+  - `BATCH_RATE_LIMIT_WINDOW_MS` / `BATCH_RATE_LIMIT_MAX` (defaults `600000` / `30`) — batch creation only, 30 / 10 min.
+  - `POLLING_RATE_LIMIT_WINDOW_MS` / `POLLING_RATE_LIMIT_MAX` (defaults `900000` / `1200`) — batch status/results polling, 1200 / 15 min (never consumes the general budget).
 - `BATCH_TTL_SECONDS` (default `86400`) — temporary batch state lifetime; no permanent batch history is retained.
-- `RESULTS_MAX_LIMIT` (default `1000`) — max results per results request; the UI paginates.
+- `RESULTS_MAX_LIMIT` (default `1000`) — max results per results request; the UI paginates. Pagination is a deliberate bounded tradeoff: pages are served from the in-Redis results hash (bounded by this cap and the 10,000-parcel batch limit), preserving stable index ordering without cursor infrastructure.
 - `MAX_QUEUE_DEPTH` (default `100`) — backpressure limit; over-limit `POST /api/batches` → `429 + Retry-After`.
 - `BATCH_CHUNK_SIZE` (default `500`) — parcels per worker recovery checkpoint.
 - `CHUNK_LEASE_MS` (default `300000`) — chunk claim lease; stale `PROCESSING` chunks become reclaimable after expiry.
+- `RECOVERY_GRACE_MS` / `RECOVERY_INTERVAL_MS` (defaults `60000` / `60000`) — orphan reconciliation: old `QUEUED` batches with no queue job are re-enqueued, periodically while running.
+- Upload sizes: the UI caps files at 9 MB, deliberately below the server's ~10 MB JSON body limit (the `{"parcels": [...]}` envelope adds bytes); the backend remains authoritative.
+- Production CORS allows `Content-Type`, `Idempotency-Key`, and `X-Request-ID` from the configured `CORS_ORIGINS` allowlist (never `*`).
 
-Mental model: **BullMQ = durable work ("what needs to happen"), Redis batch state = temporary progress/results ("what happened", TTL-expired).** Chunk checkpoints (`PENDING → PROCESSING → DONE`) are the recovery optimization — retries skip `DONE` work. Each claim mints a unique ownership token; checkpoint/release commit only when the lock still holds the caller's token (atomic Lua scripts), so a stale worker can never overwrite another worker's chunk. Parcel-level `HSETNX` result writes are the final idempotency safeguard. Duplicate computation is minimized but not mathematically eliminated under a crash occurring between computation and checkpoint.
+Mental model: **BullMQ = durable work ("what needs to happen"), Redis batch state = temporary progress/results ("what happened", TTL-expired).** Chunk checkpoints (`PENDING → PROCESSING → DONE`) are the recovery optimization — retries skip `DONE` work. Each claim mints a unique ownership token; checkpoint/release commit only when the lock still holds the caller's token (atomic Lua scripts), so a stale worker can never overwrite another worker's chunk. Batch status itself is a guarded state machine (`QUEUED → PROCESSING → COMPLETED / COMPLETED_WITH_ERRORS`, `QUEUED / PROCESSING → FAILED`): `QUEUED → PROCESSING` is atomic, so a stale worker can never resurrect a terminal batch, and terminal states are final. `Idempotency-Key` claims carry ownership tokens — only the claim owner may complete or clean up its record. Orphaned `QUEUED` batches (crash between state creation and enqueue) are re-enqueued by startup + periodic reconciliation once past the grace period. Parcel-level `HSETNX` result writes are the final idempotency safeguard. Duplicate computation is minimized but not mathematically eliminated under a crash occurring between computation and checkpoint (at-least-once processing with idempotent commits — never exactly-once execution).
 
 ## Batch Result Contract
 
@@ -113,7 +120,7 @@ Mental model: **BullMQ = durable work ("what needs to happen"), Redis batch stat
 
 ## Observability & Alerting Scope
 
-Current: structured JSON logs (request/batch/parcel/job/worker IDs), in-memory operational metrics (`GET /api/metrics`), anomaly detection surfaced via `GET /api/health/detailed`, and liveness/readiness probes. No active notifications are sent — there is no Slack/email/PagerDuty integration.
+Current: structured JSON logs (request/batch/parcel/job/worker IDs), in-memory operational metrics (`GET /api/metrics` — per-execution job durations kept separate from terminal start→terminal batch durations, recorded exactly once by the transition winner), anomaly detection surfaced via `GET /api/health/detailed`, and liveness/readiness probes. In-memory metrics reset on process restart by design. No active notifications are sent — there is no Slack/email/PagerDuty integration.
 
 Production extension: connect the anomaly detector and critical-error log signals to an external alerting channel. Deliberately out of scope for this assessment.
 

@@ -15,6 +15,13 @@
  * - errors: count of unexpected errors (cumulative process total)
  * - errorTimestamps: when each unexpected error occurred (bounded rolling
  *   window source — see countRecentErrors)
+ * - jobsProcessed / jobExecutionDurationMsTotal: BullMQ EXECUTION completions
+ *   (one execution can finish while other workers still own chunks — this is
+ *   NOT full batch duration)
+ * - terminalBatchesCompleted / terminalBatchDurationMsTotal: batches that
+ *   actually transitioned into a terminal COMPLETED state, and their full
+ *   start→terminal wall time (recorded exactly once, by the transition
+ *   winner only; retries never re-record)
  *
  * Design Decision: In-memory counters vs Prometheus client library
  * - In-memory is zero-dependency and sufficient for the assessment
@@ -37,12 +44,15 @@ const metrics = {
   httpErrors: 0,           // responses with status >= 400
   httpLatencyMsTotal: 0,
   httpLatencyCount: 0,
-  jobsProcessed: 0,        // worker jobs completed
+  jobsProcessed: 0,        // worker job executions completed
   jobsFailed: 0,           // worker jobs failed (after all retries)
   jobsRetried: 0,          // worker job attempts that will be retried
   queueDepth: 0,           // last observed waiting+active+delayed
   workerActiveJobs: 0,     // currently executing jobs
-  batchProcessingDurationMsTotal: 0,
+  jobExecutionDurationMsTotal: 0, // cumulative BullMQ execution wall time
+  terminalBatchesCompleted: 0,    // batches reaching terminal COMPLETED state
+  terminalBatchDurationMsTotal: 0, // cumulative start→terminal wall time
+  batchProcessingDurationMsTotal: 0, // legacy alias of terminal total (compat)
   startedAt: new Date().toISOString(),
 };
 
@@ -119,13 +129,32 @@ function recordHttpRequest(statusCode, durationMs) {
 }
 
 /**
- * Records a worker job completion.
+ * Records a worker job EXECUTION completion (one BullMQ execution finished).
+ * This is execution wall time — NOT full batch duration (other workers may
+ * still own chunks). Full batch duration uses recordTerminalBatch.
  *
- * @param {number} durationMs - Job processing duration
+ * @param {number} durationMs - Job execution duration
  */
 function recordJobCompleted(durationMs) {
   metrics.jobsProcessed++;
   if (typeof durationMs === 'number') {
+    metrics.jobExecutionDurationMsTotal += durationMs;
+  }
+}
+
+/**
+ * Records a TERMINAL batch completion (the batch actually transitioned into
+ * COMPLETED / COMPLETED_WITH_ERRORS). Call ONLY from the atomic transition
+ * winner: retries and concurrent workers must never call this, so each
+ * batch is counted exactly once. Duration is optional — the completion is
+ * always counted; wall time accumulates only when measurable.
+ *
+ * @param {number} [durationMs] - Start→terminal wall time
+ */
+function recordTerminalBatch(durationMs) {
+  metrics.terminalBatchesCompleted++;
+  if (typeof durationMs === 'number') {
+    metrics.terminalBatchDurationMsTotal += durationMs;
     metrics.batchProcessingDurationMsTotal += durationMs;
   }
 }
@@ -210,8 +239,14 @@ function getMetrics() {
     httpErrorRate: metrics.httpRequests > 0
       ? Number(((metrics.httpErrors / metrics.httpRequests) * 100).toFixed(2))
       : 0,
-    avgBatchDurationMs: metrics.jobsProcessed > 0
-      ? Number((metrics.batchProcessingDurationMsTotal / metrics.jobsProcessed).toFixed(2))
+    avgBatchDurationMs: metrics.terminalBatchesCompleted > 0
+      ? Number((metrics.terminalBatchDurationMsTotal / metrics.terminalBatchesCompleted).toFixed(2))
+      : 0,
+    avgJobExecutionMs: metrics.jobsProcessed > 0
+      ? Number((metrics.jobExecutionDurationMsTotal / metrics.jobsProcessed).toFixed(2))
+      : 0,
+    avgTerminalBatchDurationMs: metrics.terminalBatchesCompleted > 0
+      ? Number((metrics.terminalBatchDurationMsTotal / metrics.terminalBatchesCompleted).toFixed(2))
       : 0,
   };
 }
@@ -249,6 +284,9 @@ function resetMetrics() {
   metrics.jobsRetried = 0;
   metrics.queueDepth = 0;
   metrics.workerActiveJobs = 0;
+  metrics.jobExecutionDurationMsTotal = 0;
+  metrics.terminalBatchesCompleted = 0;
+  metrics.terminalBatchDurationMsTotal = 0;
   metrics.batchProcessingDurationMsTotal = 0;
   metrics.errorTimestamps = [];
   metrics.startedAt = new Date().toISOString();
@@ -258,6 +296,7 @@ module.exports = {
   recordRouting,
   recordFailure,
   recordBatch,
+  recordTerminalBatch,
   recordProcessingTime,
   recordError,
   countRecentErrors,

@@ -50,9 +50,53 @@ function createCorsMiddleware() {
   return cors({
     origin: allowedOrigins.length > 0 ? allowedOrigins : false,
     methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type'],
+    // Batch creation sends Idempotency-Key; distributed tracing may send
+    // X-Request-ID. Both must be preflight-allowed or browser clients fail
+    // OPTIONS before the real request ever fires. Origins stay restrictive
+    // (explicit allowlist, never *).
+    allowedHeaders: ['Content-Type', 'Idempotency-Key', 'X-Request-ID'],
+    exposedHeaders: ['X-Request-ID', 'Retry-After'],
     maxAge: 86400, // Cache preflight for 24 hours
   });
+}
+
+/**
+ * Rate-limit configuration (single source of truth for defaults).
+ *
+ * - General API: 300 requests / 15 minutes
+ * - Batch creation: 30 requests / 10 minutes
+ * - Batch polling: 1200 requests / 15 minutes
+ *
+ * Each limiter has INDEPENDENT window/max variables so tuning one never
+ * silently retunes another. Invalid values fall back to the safe defaults
+ * below (never 0/unlimited/NaN — see positiveIntOrDefault).
+ */
+const RATE_LIMIT_DEFAULTS = {
+  general: { windowMs: 15 * 60 * 1000, max: 300 },
+  batch: { windowMs: 10 * 60 * 1000, max: 30 },
+  polling: { windowMs: 15 * 60 * 1000, max: 1200 },
+};
+
+/**
+ * Resolves the effective rate-limit configuration from the environment.
+ * Exported so tests and operators can verify actual behavior (no hidden
+ * hard-coded values).
+ */
+function getRateLimitConfig() {
+  return {
+    general: {
+      windowMs: positiveIntOrDefault(process.env.RATE_LIMIT_WINDOW_MS, RATE_LIMIT_DEFAULTS.general.windowMs),
+      max: positiveIntOrDefault(process.env.RATE_LIMIT_MAX, RATE_LIMIT_DEFAULTS.general.max),
+    },
+    batch: {
+      windowMs: positiveIntOrDefault(process.env.BATCH_RATE_LIMIT_WINDOW_MS, RATE_LIMIT_DEFAULTS.batch.windowMs),
+      max: positiveIntOrDefault(process.env.BATCH_RATE_LIMIT_MAX, RATE_LIMIT_DEFAULTS.batch.max),
+    },
+    polling: {
+      windowMs: positiveIntOrDefault(process.env.POLLING_RATE_LIMIT_WINDOW_MS, RATE_LIMIT_DEFAULTS.polling.windowMs),
+      max: positiveIntOrDefault(process.env.POLLING_RATE_LIMIT_MAX, RATE_LIMIT_DEFAULTS.polling.max),
+    },
+  };
 }
 
 /**
@@ -64,23 +108,17 @@ function createCorsMiddleware() {
  *   the server or consuming all batch processing capacity.
  *
  * We use different limits for different endpoints:
- * - General API: configurable requests per configurable window
- * - Batch creation: configurable requests per configurable window
- *   (each batch is expensive). The batch limiter applies ONLY to
- *   POST /api/batches — status/results polling has its own dedicated
- *   limiter (createPollingRateLimiter) so legitimate polling is never
- *   throttled by creation limits.
+ * - General API: 300 requests / 15 minutes
+ * - Batch creation: 30 requests / 10 minutes (each batch is expensive).
+ *   The batch limiter applies ONLY to POST /api/batches — status/results
+ *   polling has its own dedicated limiter (createPollingRateLimiter) so
+ *   legitimate polling is never throttled by creation limits.
  */
 function createGeneralRateLimiter() {
+  const cfg = getRateLimitConfig().general;
   return rateLimit({
-    windowMs: positiveIntOrDefault(
-      process.env.RATE_LIMIT_WINDOW_MS,
-      15 * 60 * 1000, // 15 minutes
-    ),
-    max: positiveIntOrDefault(
-      process.env.RATE_LIMIT_MAX,
-      100, // 100 requests per window
-    ),
+    windowMs: cfg.windowMs,
+    max: cfg.max,
     standardHeaders: true,     // Return rate limit info in `RateLimit-*` headers
     legacyHeaders: false,      // Disable `X-RateLimit-*` headers
     // Batch status/results polling has its own dedicated limiter (see
@@ -107,7 +145,7 @@ function isBatchPollRequest(req) {
 }
 
 /**
- * Dedicated limiter for batch status/results polling.
+ * Dedicated limiter for batch status/results polling: 1200 / 15 minutes.
  *
  * Threat: polling abuse (a client hammering status in a tight loop).
  * Protection: generous dedicated budget, separate from interactive traffic.
@@ -115,15 +153,10 @@ function isBatchPollRequest(req) {
  * while a tight abuse loop still gets throttled.
  */
 function createPollingRateLimiter() {
+  const cfg = getRateLimitConfig().polling;
   return rateLimit({
-    windowMs: positiveIntOrDefault(
-      process.env.RATE_LIMIT_WINDOW_MS,
-      15 * 60 * 1000, // 15 minutes
-    ),
-    max: positiveIntOrDefault(
-      process.env.POLLING_RATE_LIMIT_MAX,
-      300, // 300 polling reads per window (2+ minutes at 1/sec + pages)
-    ),
+    windowMs: cfg.windowMs,
+    max: cfg.max,
     standardHeaders: true,
     legacyHeaders: false,
     message: {
@@ -134,15 +167,10 @@ function createPollingRateLimiter() {
 }
 
 function createBatchRateLimiter() {
+  const cfg = getRateLimitConfig().batch;
   return rateLimit({
-    windowMs: positiveIntOrDefault(
-      process.env.RATE_LIMIT_WINDOW_MS,
-      15 * 60 * 1000, // 15 minutes
-    ),
-    max: positiveIntOrDefault(
-      process.env.BATCH_RATE_LIMIT_MAX,
-      10, // 10 batch creation requests per window
-    ),
+    windowMs: cfg.windowMs,
+    max: cfg.max,
     standardHeaders: true,
     legacyHeaders: false,
     message: {
@@ -254,6 +282,8 @@ module.exports = {
   createGeneralRateLimiter,
   createBatchRateLimiter,
   createPollingRateLimiter,
+  getRateLimitConfig,
+  RATE_LIMIT_DEFAULTS,
   isBatchPollRequest,
   createHelmetMiddleware,
   sanitizeInput,

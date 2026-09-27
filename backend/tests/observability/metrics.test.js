@@ -6,6 +6,7 @@ const {
   recordRouting,
   recordFailure,
   recordBatch,
+  recordTerminalBatch,
   recordHttpRequest,
   recordJobCompleted,
   recordJobFailed,
@@ -47,7 +48,30 @@ describe('Strict observability metrics', () => {
     expect(m.jobsRetried).toBe(1);
     expect(m.queueDepth).toBe(7);
     expect(m.workerActiveJobs).toBe(1);
-    expect(m.avgBatchDurationMs).toBe(2000);
+    // Job-execution duration is tracked separately from terminal batch time.
+    expect(m.avgJobExecutionMs).toBe(2000);
+    expect(m.terminalBatchesCompleted).toBe(0);
+    expect(m.avgTerminalBatchDurationMs).toBe(0);
+    expect(m.avgBatchDurationMs).toBe(0);
+  });
+
+  it('terminal batch completions are counted exactly once with wall time', () => {
+    recordTerminalBatch(500);
+    recordTerminalBatch(1500);
+    const m = getMetrics();
+    expect(m.terminalBatchesCompleted).toBe(2);
+    expect(m.avgTerminalBatchDurationMs).toBe(1000);
+    // avgBatchDurationMs stays the terminal-batch average (compat alias).
+    expect(m.avgBatchDurationMs).toBe(1000);
+  });
+
+  it('retries do not fake terminal measurements (job vs batch separated)', () => {
+    recordJobCompleted(100);
+    recordJobCompleted(200);
+    const m = getMetrics();
+    expect(m.jobsProcessed).toBe(2);
+    expect(m.avgJobExecutionMs).toBe(150);
+    expect(m.terminalBatchesCompleted).toBe(0);
   });
 
   it('exposes retry/backpressure-relevant defaults', () => {

@@ -20,7 +20,7 @@ require('dotenv').config();
 const app = require('./app');
 const { pingRedis, closeRedis, startEmbeddedRedisIfEnabled } = require('./infrastructure/redis');
 const { initQueue, closeQueue } = require('./infrastructure/queue');
-const { recoverOrphanedBatches } = require('./infrastructure/recovery');
+const { recoverOrphanedBatches, startPeriodicRecovery, stopPeriodicRecovery } = require('./infrastructure/recovery');
 const { createWorker, closeWorker } = require('./infrastructure/worker');
 const { logger } = require('./observability/logger');
 
@@ -28,6 +28,7 @@ const PORT = process.env.PORT || 3001;
 
 // --- Infrastructure initialization ---
 let server;
+let recoveryHandle = null;
 
 async function start() {
   try {
@@ -53,11 +54,15 @@ async function start() {
 
     // 2b. Recover batches orphaned by a crash between state creation and
     // job enqueue (QUEUED with no job). Never crashes boot: failures log.
+    // Plus periodic reconciliation: batches still inside the grace period
+    // at startup age out and are picked up by later passes instead of
+    // lingering QUEUED until TTL expiry.
     try {
       await recoverOrphanedBatches();
     } catch (err) {
       logger.warn('Orphan batch recovery failed; continuing startup', { error: err.message });
     }
+    recoveryHandle = startPeriodicRecovery();
 
     // 3. Start worker (consumes batch jobs from queue)
     createWorker(bullMqConnection ? { connection: bullMqConnection } : undefined);
@@ -93,6 +98,10 @@ async function shutdown(signal) {
   console.log(`\n[Server] ${signal} received. Shutting down gracefully...`);
 
   try {
+    // 0. Stop periodic orphan reconciliation first (no new recovery work).
+    stopPeriodicRecovery(recoveryHandle);
+    recoveryHandle = null;
+
     // 1. Stop accepting new HTTP connections
     if (server) {
       await new Promise((resolve) => {

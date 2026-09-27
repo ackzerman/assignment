@@ -8,6 +8,8 @@ const redis = require('../../src/infrastructure/redis');
 const store = require('../../src/infrastructure/batchStore');
 const {
   recoverOrphanedBatches,
+  startPeriodicRecovery,
+  stopPeriodicRecovery,
   DEFAULT_RECOVERY_GRACE_MS,
 } = require('../../src/infrastructure/recovery');
 
@@ -138,5 +140,74 @@ describe('Orphan batch recovery', () => {
     } finally {
       await redis.closeRedis();
     }
+  });
+
+  it('periodic reconciliation recovers batches that age past the grace period', async () => {
+    // A batch created 20s before a restart is skipped by the startup pass
+    // (60s grace) — the periodic pass must pick it up once it ages out.
+    const states = {
+      'BATCH-delayed': { status: 'QUEUED', createdAt: new Date(NOW - 20_000).toISOString() },
+    };
+    const added = [];
+    const queue = fakeQueue();
+    const origAdd = queue.addBatchJob;
+    queue.addBatchJob = async (id) => { added.push(id); return origAdd(id); };
+
+    // Startup pass: skipped (still in grace).
+    const first = await recoverOrphanedBatches({
+      now: NOW,
+      batchStore: fakeStore(states),
+      queueModule: queue,
+      log: silentLog,
+    });
+    expect(first).toEqual({ checked: 1, recovered: 0, skipped: 1 });
+    expect(added).toHaveLength(0);
+
+    // Periodic pass 60s later: aged out, recovered.
+    const handle = startPeriodicRecovery({
+      intervalMs: 25,
+      graceMs: DEFAULT_RECOVERY_GRACE_MS,
+      deps: {
+        batchStore: {
+          listBatchIds: async () => Object.keys(states),
+          // Time has advanced: the batch is now older than the grace period.
+          getBatchState: async (id) => (
+            states[id]
+              ? { ...states[id], createdAt: new Date(NOW - DEFAULT_RECOVERY_GRACE_MS - 1000).toISOString() }
+              : null
+          ),
+        },
+        queueModule: queue,
+        log: silentLog,
+      },
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    } finally {
+      stopPeriodicRecovery(handle);
+    }
+    expect(added).toEqual(['BATCH-delayed']);
+  });
+
+  it('periodic recovery never touches terminal batches', async () => {
+    const states = {
+      'BATCH-term': { status: 'COMPLETED', createdAt: OLD },
+    };
+    const added = [];
+    const queue = fakeQueue();
+    const origAdd = queue.addBatchJob;
+    queue.addBatchJob = async (id) => { added.push(id); return origAdd(id); };
+
+    const handle = startPeriodicRecovery({
+      intervalMs: 25,
+      graceMs: 0,
+      deps: { batchStore: fakeStore(states), queueModule: queue, log: silentLog },
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    } finally {
+      stopPeriodicRecovery(handle);
+    }
+    expect(added).toHaveLength(0);
   });
 });

@@ -48,11 +48,12 @@ app.use(createHelmetMiddleware());
 app.use(createCorsMiddleware());
 
 // --- 4. Rate Limiting ---
-// The strict batch-creation limiter applies ONLY to POST /api/batches
-// (each creation enqueues expensive worker capacity). GET status/results
-// polling bypasses the general limiter (see isBatchPollRequest) and uses a
-// dedicated polling limiter mounted on the batch GET routes — otherwise a
-// normal batch taking longer than ~10 polls would 429 legitimate polling.
+// The strict batch-creation limiter (30 / 10 min) applies ONLY to
+// POST /api/batches (each creation enqueues expensive worker capacity).
+// GET status/results polling bypasses the general limiter (see
+// isBatchPollRequest) and uses a dedicated polling limiter (1200 / 15 min)
+// mounted on the batch GET routes — otherwise a normal batch taking
+// longer than ~10 polls would 429 legitimate polling.
 app.use('/api/', createGeneralRateLimiter());
 app.post('/api/batches', createBatchRateLimiter());
 

@@ -176,7 +176,7 @@ router.post('/', async (req, res, next) => {
       throw new AppError(idemKey.error, 400);
     }
 
-    let idemClaimed = false;
+    let idemToken = null;
     if (idemKey) {
       const replay = await resolveIdempotentSubmission(idemKey.key, batchValidation.parcels, req.id);
       if (replay.replay) {
@@ -191,7 +191,7 @@ router.post('/', async (req, res, next) => {
           },
         });
       }
-      idemClaimed = true;
+      idemToken = replay.token;
     }
 
     let created;
@@ -200,31 +200,32 @@ router.post('/', async (req, res, next) => {
         requestId: req.id,
       });
     } catch (error) {
-      // Our claim must not block an honest retry of the same key.
-      if (idemClaimed) {
-        await store.deleteIdempotencyKey(idemKey.key).catch(() => {});
+      // Clean up ONLY our own claim: a stale owner must never delete a
+      // newer owner's re-claim of the same key.
+      if (idemToken) {
+        await store.deleteIdempotencyKeyIfOwner(idemKey.key, idemToken).catch(() => {});
       }
       throw error;
     }
 
-    if (idemClaimed) {
-      await store.setIdempotencyRecord(
+    if (idemToken) {
+      const bodyHash = store.hashParcelPayload(batchValidation.parcels);
+      const committed = await store.completeIdempotencyRecord(
         idemKey.key,
-        {
-          status: 'complete',
-          batchId: created.batchId,
-          bodyHash: store.hashParcelPayload(batchValidation.parcels),
-        },
+        idemToken,
+        { batchId: created.batchId, bodyHash },
         store.getBatchTTLSeconds(),
-      ).catch((err) => {
-        // Mapping failure only loses replayability, never correctness:
-        // the batch itself was created and queued normally.
-        logger.warn('Failed to store idempotency mapping', {
+      ).catch(() => false);
+      if (!committed) {
+        // Our claim expired and someone else re-claimed the key mid-flight:
+        // their record wins. Our batch was still created and queued normally,
+        // so return it directly (no shared mapping, no duplicate suppression
+        // for this response — at-least-once, never silent loss).
+        logger.warn('Idempotency completion lost ownership; returning own batch', {
           requestId: req.id,
           batchId: created.batchId,
-          error: err.message,
         });
-      });
+      }
     }
 
     res.status(202).json({
@@ -262,14 +263,18 @@ function readIdempotencyKey(req) {
 }
 
 /**
- * Resolves an idempotent submission attempt.
+ * Resolves an idempotent submission attempt (ownership-token based).
  *
- * - No record → claims the key for this caller ({ replay: false }).
- * - Pending record (another request in flight) → throws 409, retry later.
+ * - No record → claims the key, returning the caller's private token
+ *   ({ replay: false, token }). Only this token may complete/clean up.
+ * - Pending record (another request in flight, or a legacy claim) →
+ *   throws 409, retry later.
  * - Complete record, same body → returns the original batch ({ replay: true }).
  * - Complete record, different body → throws 409 conflict.
- * - Complete record but batch state gone → deletes the stale mapping and
+ * - Complete record but batch state gone → deletes the orphaned mapping and
  *   retries the claim loop (bounded) so the retry proceeds as new work.
+ *   (Deletion here only ever removes complete-but-orphaned mappings; the
+ *   subsequent claim re-arbitrates, so concurrent cleaners stay safe.)
  */
 async function resolveIdempotentSubmission(key, parcels, requestId) {
   const bodyHash = store.hashParcelPayload(parcels);
@@ -279,13 +284,14 @@ async function resolveIdempotentSubmission(key, parcels, requestId) {
     const record = await store.getIdempotencyRecord(key);
 
     if (!record) {
-      if (await store.claimIdempotencyKey(key, ttl)) {
-        return { replay: false };
+      const token = await store.claimIdempotencyKey(key, ttl);
+      if (token) {
+        return { replay: false, token };
       }
       continue; // Lost a claim race: re-read and handle the winner's record.
     }
 
-    if (!record.batchId) {
+    if (record.status === 'pending' || !record.batchId) {
       throw new AppError(
         'A batch with this Idempotency-Key is already being processed. Please retry shortly.',
         409,
@@ -363,11 +369,16 @@ router.get('/:batchId/results', pollingLimiter, async (req, res, next) => {
       throw new AppError(`Batch '${batchId}' not found or expired.`, 404);
     }
 
-    const { limit, offset } = req.query;
-    const results = await store.getBatchResults(batchId, {
-      limit: limit ? parseInt(limit, 10) : undefined,
-      offset: offset ? parseInt(offset, 10) : undefined,
-    });
+    // Strict pagination: malformed explicit limit/offset values are 400,
+    // never silently reinterpreted (see parsePaginationQuery).
+    let limit;
+    let offset;
+    try {
+      ({ limit, offset } = store.parsePaginationQuery(req.query));
+    } catch (err) {
+      throw new AppError(err.message, 400);
+    }
+    const results = await store.getBatchResults(batchId, { limit, offset });
     const totalResults = await store.getBatchResultCount(batchId);
 
     res.status(200).json({

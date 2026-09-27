@@ -32,13 +32,11 @@ const { logger } = require('../observability/logger');
 const { positiveIntOrDefault } = require('../config');
 
 function getBatchTTLSeconds() {
-  const parsed = parseInt(process.env.BATCH_TTL_SECONDS || '86400', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 86400;
+  return positiveIntOrDefault(process.env.BATCH_TTL_SECONDS, 86400);
 }
 
 function getDefaultChunkSize() {
-  const parsed = parseInt(process.env.BATCH_CHUNK_SIZE || '500', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 500;
+  return positiveIntOrDefault(process.env.BATCH_CHUNK_SIZE, 500);
 }
 
 function getDefaultChunkLeaseMs() {
@@ -48,8 +46,7 @@ function getDefaultChunkLeaseMs() {
 }
 
 function getResultsMaxLimit() {
-  const parsed = parseInt(process.env.RESULTS_MAX_LIMIT || '1000', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1000;
+  return positiveIntOrDefault(process.env.RESULTS_MAX_LIMIT, 1000);
 }
 
 function keys(batchId) {
@@ -134,6 +131,21 @@ const RELEASE_SCRIPT = [
   "  redis.call('hset', KEYS[2], ARGV[2], 'PENDING')",
   'end',
   "redis.call('del', KEYS[1])",
+  'return 1',
+].join('\n');
+
+// Atomic QUEUED → PROCESSING transition: ONLY from QUEUED.
+// A stale worker that read QUEUED earlier can never resurrect a terminal
+// batch (COMPLETED / COMPLETED_WITH_ERRORS / FAILED) or re-stamp an
+// already-PROCESSING batch. Stamps startedAt atomically with the transition.
+// Returns 1 if this call performed the transition, 0 otherwise.
+const TRY_PROCESSING_SCRIPT = [
+  "local status = redis.call('hget', KEYS[1], 'status')",
+  "if status ~= 'QUEUED' then",
+  '  return 0',
+  'end',
+  "redis.call('hset', KEYS[1], 'status', 'PROCESSING', 'startedAt', ARGV[1])",
+  "redis.call('expire', KEYS[1], ARGV[2])",
   'return 1',
 ].join('\n');
 
@@ -490,12 +502,47 @@ function serializeResult(r) {
 }
 
 /**
+ * Atomic QUEUED → PROCESSING transition (single Lua script).
+ * Only the execution that observes QUEUED atomically flips the status;
+ * a stale worker that read QUEUED earlier but arrives after another
+ * execution finalized the batch gets `false` and must NOT proceed as if
+ * it owned the batch. Terminal states are therefore unresurrectable.
+ *
+ * @returns {boolean} true if this call performed the transition
+ */
+async function tryMarkBatchProcessing(batchId) {
+  const redis = await getRedisClient();
+  const k = keys(batchId);
+  const transitioned = await redis.eval(
+    TRY_PROCESSING_SCRIPT,
+    1,
+    k.meta,
+    new Date().toISOString(),
+    getBatchTTLSeconds(),
+  );
+  return transitioned === 1;
+}
+
+/**
  * Updates batch status fields (QUEUED→PROCESSING→terminal). Terminal states
  * also stamp completedAt. Refreshes the meta TTL.
+ *
+ * State-machine guard: a terminal batch (COMPLETED, COMPLETED_WITH_ERRORS,
+ * FAILED) can never leave its terminal state through this setter. Use the
+ * atomic try* transitions (tryMarkBatchProcessing / tryFinalizeBatch /
+ * tryMarkBatchFailed) on hot paths; this setter throws on terminal escape
+ * so a programming error fails loudly instead of resurrecting finished work.
  */
 async function setBatchStatus(batchId, status, extra = {}) {
   const redis = await getRedisClient();
   const k = keys(batchId);
+  const current = await redis.hget(k.meta, 'status');
+  if (
+    (current === 'COMPLETED' || current === 'COMPLETED_WITH_ERRORS' || current === 'FAILED') &&
+    current !== status
+  ) {
+    throw new Error(`Illegal batch transition: ${current} → ${status} (terminal states are final)`);
+  }
   const fields = { status };
   if (extra.startedAt) fields.startedAt = extra.startedAt;
   if (extra.completedAt) fields.completedAt = extra.completedAt;
@@ -507,10 +554,10 @@ async function setBatchStatus(batchId, status, extra = {}) {
 }
 
 async function markBatchFailed(batchId, error) {
-  await setBatchStatus(batchId, 'FAILED', {
-    completedAt: new Date().toISOString(),
-    error,
-  });
+  // Guarded: already-terminal batches (e.g. COMPLETED) are never overwritten
+  // by a stale failure. Returns silently whether or not we transitioned —
+  // callers needing the boolean use tryMarkBatchFailed directly.
+  await tryMarkBatchFailed(batchId, error);
 }
 
 /**
@@ -571,6 +618,80 @@ async function deleteBatch(batchId) {
   if (all.length > 0) {
     await redis.del(...all);
   }
+}
+
+/**
+ * Strict pagination query parsing for GET /api/batches/:batchId/results.
+ *
+ * Query values arrive as strings and must match the application's strict
+ * validation philosophy: parseInt-style prefix parsing ("100abc" → 100)
+ * is rejected instead of silently reinterpreted.
+ *
+ * - missing → default (limit: maxLimit, offset: 0)
+ * - "100" → 100
+ * - "0" (limit), "-1", "1.5", "100abc", "NaN", "" → 400 error
+ * - offset "0" is valid; limit must be >= 1
+ * - limit is capped at maxLimit (never unbounded)
+ *
+ * Throws an Error with `statusCode = 400` and a safe public message.
+ */
+function parsePaginationQuery(query = {}, maxLimit = getResultsMaxLimit()) {
+  const { limit: limitRaw, offset: offsetRaw } = query;
+
+  let limit = maxLimit;
+  if (limitRaw !== undefined) {
+    limit = parseStrictPositiveInt(limitRaw, 'limit');
+  }
+  limit = Math.min(limit, maxLimit);
+
+  let offset = 0;
+  if (offsetRaw !== undefined) {
+    offset = parseStrictNonNegativeInt(offsetRaw, 'offset');
+  }
+
+  return { limit, offset };
+}
+
+/**
+ * Parses a strictly decimal positive integer (>= 1). Rejects empty strings,
+ * signs, decimals, trailing garbage, NaN, and non-string/number types.
+ */
+function parseStrictPositiveInt(raw, name) {
+  const err = badPaginationParam(name);
+  if (typeof raw === 'number') {
+    if (!Number.isInteger(raw) || raw < 1) throw err;
+    return raw;
+  }
+  if (typeof raw !== 'string' || raw === '') throw err;
+  if (!/^[1-9][0-9]*$/.test(raw)) throw err;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed)) throw err;
+  return parsed;
+}
+
+/**
+ * Parses a strictly decimal non-negative integer (>= 0).
+ */
+function parseStrictNonNegativeInt(raw, name) {
+  const err = badPaginationParam(name);
+  if (typeof raw === 'number') {
+    if (!Number.isInteger(raw) || raw < 0) throw err;
+    return raw;
+  }
+  if (typeof raw !== 'string' || raw === '') throw err;
+  if (!/^(0|[1-9][0-9]*)$/.test(raw)) throw err;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed)) throw err;
+  return parsed;
+}
+
+function badPaginationParam(name) {
+  const err = new Error(
+    `Invalid query parameter "${name}". Expected a strictly decimal integer string ` +
+      `(${name === 'limit' ? '>= 1' : '>= 0'}).`,
+  );
+  err.statusCode = 400;
+  return err;
 }
 
 /**
@@ -654,45 +775,102 @@ function hashParcelPayload(parcels) {
   return createHash('sha256').update(stableStringify(parcels)).digest('hex');
 }
 
+// Atomic idempotency compare-and-set scripts. Pending claims are stored as
+// the plain string `pending:<token>`; only the token holder may complete or
+// clean up its own claim, so a stale request (slow, TTL-expired) can never
+// overwrite or delete a newer owner's record. Plain-string comparison keeps
+// the Lua trivially correct (no JSON parsing inside scripts).
+const IDEM_COMPLETE_SCRIPT = [
+  "local raw = redis.call('get', KEYS[1])",
+  "if raw ~= 'pending:' .. ARGV[1] then return 0 end",
+  "redis.call('set', KEYS[1], ARGV[2], 'EX', ARGV[3])",
+  'return 1',
+].join('\n');
+
+const IDEM_DELETE_IF_OWNER_SCRIPT = [
+  "local raw = redis.call('get', KEYS[1])",
+  'if not raw then return 1 end',
+  "if raw ~= 'pending:' .. ARGV[1] then return 0 end",
+  "redis.call('del', KEYS[1])",
+  'return 1',
+].join('\n');
+
 function idempotencyRedisKey(key) {
   return `idempotency:${key}`;
 }
 
 /**
- * Atomically claims an idempotency key (SET NX). Returns true when this
- * caller won the claim and may proceed; false means another request with
- * the same key is in flight or completed — read the record to decide.
+ * Atomically claims an idempotency key (SET NX) with a unique ownership
+ * token, stored as the plain string `pending:<token>`. Returns the token
+ * when this caller won the claim and may proceed; returns null when another
+ * request holds the key — read the record to decide (replay vs 409).
+ * The token must accompany every later mutation of this claim.
  */
 async function claimIdempotencyKey(key, ttlSec) {
   const redis = await getRedisClient();
+  const token = randomUUID();
   const acquired = await redis.set(
     idempotencyRedisKey(key),
-    JSON.stringify({ status: 'pending' }),
+    `pending:${token}`,
     'EX',
     ttlSec,
     'NX',
   );
-  return acquired === 'OK';
+  return acquired === 'OK' ? token : null;
 }
 
 /**
- * Reads an idempotency record: null (absent/expired), { status: 'pending' },
- * or { status: 'complete', batchId, bodyHash }.
+ * Reads an idempotency record: null (absent/expired),
+ * { status: 'pending', token } (token null for legacy claims), or
+ * { status: 'complete', batchId, bodyHash, token }.
  */
 async function getIdempotencyRecord(key) {
   const redis = await getRedisClient();
   const raw = await redis.get(idempotencyRedisKey(key));
   if (!raw) return null;
+  if (typeof raw === 'string' && raw.startsWith('pending:')) {
+    return { status: 'pending', token: raw.slice('pending:'.length) || null };
+  }
   try {
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : null;
+    if (parsed && typeof parsed === 'object') {
+      // Legacy pending claims stored without a token: unowned, never
+      // completable or deletable by token — they expire via TTL.
+      return parsed;
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
 /**
+ * Completes our own pending claim (pending + token → complete + batchId +
+ * bodyHash), but ONLY if we still own it. A stale request whose claim
+ * expired and was re-claimed by someone else gets `false` and must NOT
+ * overwrite the newer owner's record — its own batch (already created and
+ * queued) is still returned normally, just without the shared mapping.
+ *
+ * @returns {boolean} true if the completion was committed
+ */
+async function completeIdempotencyRecord(key, token, { batchId, bodyHash }, ttlSec) {
+  const redis = await getRedisClient();
+  const completed = await redis.eval(
+    IDEM_COMPLETE_SCRIPT,
+    1,
+    idempotencyRedisKey(key),
+    token,
+    JSON.stringify({ status: 'complete', batchId, bodyHash, token }),
+    ttlSec,
+  );
+  return completed === 1;
+}
+
+/**
  * Stores the completed idempotency mapping (overwrites our own claim).
+ *
+ * @deprecated Use completeIdempotencyRecord (ownership-checked) instead.
+ * Kept for backward compatibility with existing callers/tests.
  */
 async function setIdempotencyRecord(key, record, ttlSec) {
   const redis = await getRedisClient();
@@ -701,10 +879,31 @@ async function setIdempotencyRecord(key, record, ttlSec) {
 
 /**
  * Deletes an idempotency record (cleanup after failures).
+ *
+ * @deprecated Use deleteIdempotencyKeyIfOwner instead: unconditional
+ * deletion can remove a newer owner's claim.
  */
 async function deleteIdempotencyKey(key) {
   const redis = await getRedisClient();
   await redis.del(idempotencyRedisKey(key));
+}
+
+/**
+ * Deletes an idempotency record, but ONLY if the caller's token still owns
+ * it. A stale owner cleaning up after a failure can never delete a newer
+ * owner's claim. Missing keys report success (nothing to clean).
+ *
+ * @returns {boolean} true if no foreign claim was disturbed
+ */
+async function deleteIdempotencyKeyIfOwner(key, token) {
+  const redis = await getRedisClient();
+  const ok = await redis.eval(
+    IDEM_DELETE_IF_OWNER_SCRIPT,
+    1,
+    idempotencyRedisKey(key),
+    token,
+  );
+  return ok === 1;
 }
 
 module.exports = {
@@ -724,15 +923,19 @@ module.exports = {
   checkpointChunk,
   setBatchStatus,
   markBatchFailed,
+  tryMarkBatchProcessing,
   tryMarkBatchFailed,
   tryFinalizeBatch,
   deleteBatch,
   getBatchResults,
   getBatchResultCount,
+  parsePaginationQuery,
   listBatchIds,
   hashParcelPayload,
   claimIdempotencyKey,
   getIdempotencyRecord,
+  completeIdempotencyRecord,
   setIdempotencyRecord,
   deleteIdempotencyKey,
+  deleteIdempotencyKeyIfOwner,
 };

@@ -282,6 +282,7 @@
   background: #fef3c7;
   color: #92400e;
   border: 1px solid #fcd34d;
+  font-weight: 700;
 }
 
 .approval-badge.not-required {
@@ -538,6 +539,13 @@
   margin-bottom: 16px;
 }
 
+.batch-reference {
+  font-size: 0.75rem;
+  color: var(--color-text-muted, #6b7280);
+  margin: 4px 0 0;
+  word-break: break-all;
+}
+
 .batch-failed-banner strong {
   color: #991b1b;
   font-size: 1rem;
@@ -760,6 +768,7 @@
 
 .approval-badge-sm.required {
   color: #92400e;
+  font-weight: 700;
 }
 
 .approval-badge-sm.not-required {
