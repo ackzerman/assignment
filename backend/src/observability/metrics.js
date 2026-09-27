@@ -138,6 +138,21 @@ function setQueueDepth(depth) {
 }
 
 /**
+ * Increments the active worker job count (concurrency-safe: Node.js runs
+ * job processors on a single thread, so += 1 is atomic here).
+ */
+function workerJobStarted() {
+  metrics.workerActiveJobs++;
+}
+
+/**
+ * Decrements the active worker job count (floored at 0).
+ */
+function workerJobFinished() {
+  metrics.workerActiveJobs = Math.max(0, metrics.workerActiveJobs - 1);
+}
+
+/**
  * Sets the current number of active worker jobs (worker utilization).
  *
  * @param {number} count
@@ -228,6 +243,8 @@ module.exports = {
   recordJobCompleted,
   recordJobFailed,
   recordJobRetry,
+  workerJobStarted,
+  workerJobFinished,
   setQueueDepth,
   setWorkerActiveJobs,
   getMetrics,

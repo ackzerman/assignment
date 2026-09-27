@@ -1,24 +1,13 @@
 /**
- * Batch Processor
+ * Batch Processor (domain helper)
  *
- * Processes an array of parcel data in chunks, validating and routing each
- * parcel independently. This ensures:
+ * Pure, dependency-free batch validation + routing over an in-memory array,
+ * kept as unit-tested domain logic (mixed-validity handling, chunked event-
+ * loop yields, progress callbacks).
  *
- * 1. MIXED-VALIDITY — One invalid parcel doesn't block the rest.
- *    Valid parcels are routed, invalid ones are reported with errors.
- *
- * 2. CHUNKED PROCESSING — Large arrays are processed in configurable chunks
- *    to avoid blocking the event loop and consuming excessive memory.
- *    This is important because a batch could contain 100,000+ parcels.
- *
- * 3. PROGRESS REPORTING — An optional callback receives progress updates
- *    after each chunk, enabling real-time progress in the UI.
- *
- * Design Decision: Why process in the same request rather than a job queue?
- * - A job queue (Bull, Bee-Queue) would be overkill for this assessment
- * - The assessment says "do not build a distributed job-processing platform"
- * - Chunked synchronous processing with progress callbacks is the right
- *   balance of simplicity and large-file handling
+ * NOTE: HTTP batch creation is asynchronous (POST /api/batches → DB record +
+ * BullMQ job → worker with chunk checkpoints). This helper is no longer wired
+ * into the HTTP path; the worker is the single runtime batch implementation.
  */
 
 const { validateParcelInput } = require('./validation');
@@ -184,6 +173,25 @@ function validateBatchInput(data, maxBatchSize = 10000) {
       valid: false,
       error: `Batch size exceeds maximum of ${maxBatchSize.toLocaleString()} parcels. Please split into smaller batches.`,
     };
+  }
+
+  // Duplicate parcel IDs would collide under UNIQUE(batchId, parcelId) and
+  // silently drop one input parcel's result. Reject them up front instead.
+  // Only explicitly provided IDs are checked; parcels without an ID receive
+  // an auto-generated one later and are unaffected.
+  const seenIds = new Set();
+  for (let i = 0; i < data.parcels.length; i++) {
+    const parcel = data.parcels[i];
+    if (parcel && typeof parcel === 'object' && parcel.parcelId !== undefined && parcel.parcelId !== null && parcel.parcelId !== '') {
+      const key = String(parcel.parcelId);
+      if (seenIds.has(key)) {
+        return {
+          valid: false,
+          error: `Duplicate parcelId "${parcel.parcelId}" in batch (index ${i}). Parcel IDs must be unique within a batch.`,
+        };
+      }
+      seenIds.add(key);
+    }
   }
 
   return { valid: true, parcels: data.parcels };

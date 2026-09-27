@@ -70,14 +70,16 @@ npm run dev        # Start development server (port 5173)
 | `GET` | `/health/ready` | Readiness: DB + queue reachable? |
 | `GET` | `/api/metrics` | Counters: HTTP, routing, jobs, queue depth, latencies |
 
-Legacy aliases kept: `POST /api/parcels/route`, `POST /api/parcels/batch` (sync).
+Legacy aliases kept: `POST /api/parcels/route` (single), `POST /api/parcels/batch` (async alias of `POST /api/batches`, returns `202`).
 
 ## Configuration (`backend/.env.example`)
 
 - `API_TOKENS` — optional Bearer tokens; when set, batches are owned and cross-owner reads → `403`.
 - `MAX_QUEUE_DEPTH` (default `100`) — backpressure limit; over-limit `POST /api/batches` → `429 + Retry-After`.
 - `REDIS_HOST` / `REDIS_PORT` — BullMQ durable queue; retries `3` with exponential backoff `1s→2s→4s`.
-- Queue payload is `{ batchId }` only; worker loads data from DB. Results protected by `UNIQUE(batch_id, parcel_id)`.
+- `BATCH_CHUNK_SIZE` (default `500`) — parcels per worker recovery checkpoint.
+- `CHUNK_LEASE_MS` (default `300000`) — chunk claim lease; stale `PROCESSING` chunks become reclaimable after expiry.
+- Queue payload is `{ batchId }` only; worker loads data from DB. Results protected by `UNIQUE(batch_id, parcel_id)` (final idempotency safeguard); chunk checkpoints (`PENDING → PROCESSING → DONE`) are the recovery optimization. **Redis/BullMQ = durable work, database = durable state and results.**
 
 ## Core Architecture Decisions Summary
 

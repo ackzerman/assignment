@@ -14,10 +14,12 @@ const express = require('express');
 const { randomUUID } = require('crypto');
 const { validateParcelInput, getValidCountryCodes } = require('../../domain/validation');
 const { routeParcel } = require('../../domain/routingEngine');
-const { processBatch, validateBatchInput } = require('../../domain/batchProcessor');
+const { validateBatchInput } = require('../../domain/batchProcessor');
+const { enqueueBatch } = require('./batchRoutes');
+const { authOptional } = require('../middleware/auth');
 const { ValidationFailedError, AppError } = require('../../errors/AppError');
 const { logger } = require('../../observability/logger');
-const { recordRouting, recordFailure, recordBatch, recordProcessingTime } = require('../../observability/metrics');
+const { recordRouting, recordFailure, recordProcessingTime } = require('../../observability/metrics');
 
 const router = express.Router();
 
@@ -140,77 +142,40 @@ router.get('/countries', (_req, res) => {
 });
 
 /**
- * POST /api/parcels/batch
+ * POST /api/parcels/batch — LEGACY compatibility alias (async).
  *
- * Processes a batch of parcels from a JSON upload.
- * Assigns a unique batch ID for tracking.
- *
- * User-facing response:
- *   "980 parcels processed successfully. 20 parcels require correction. Batch ID: BATCH-abc123"
- *
- * Internal logs:
- *   Detailed per-parcel routing decisions, timing, errors with full context.
+ * Historically this endpoint processed batches synchronously in the request.
+ * It now reuses the canonical asynchronous creation path (same validation,
+ * same DB record, same BullMQ job as POST /api/batches) so only ONE batch
+ * implementation exists. Returns 202; poll GET /api/batches/:batchId.
  */
-router.post('/batch', async (req, res, next) => {
-  const start = Date.now();
-  const batchId = `BATCH-${randomUUID().split('-')[0]}`;
-
+router.post('/batch', authOptional, async (req, res, next) => {
   try {
-    // Step 1: Validate the batch container
     const batchValidation = validateBatchInput(req.body);
     if (!batchValidation.valid) {
       logger.warn('Batch validation failed', {
         requestId: req.id,
-        batchId,
-        operation: 'batch_process',
+        operation: 'batch_process_legacy',
         error: batchValidation.error,
       });
       throw new AppError(batchValidation.error, 400);
     }
 
-    logger.info('Batch processing started', {
+    const owner = req.user?.id || 'anonymous';
+    const created = await enqueueBatch(batchValidation.parcels, {
+      owner,
       requestId: req.id,
-      batchId,
-      operation: 'batch_process',
-      parcelCount: batchValidation.parcels.length,
     });
 
-    // Step 2: Process each parcel (validate + route)
-    const result = await processBatch(batchValidation.parcels);
-
-    // Step 3: Record metrics
-    const duration = Date.now() - start;
-    recordBatch(result.summary);
-    recordProcessingTime(duration);
-
-    // Record individual routing outcomes for metrics
-    for (const r of result.results) {
-      if (r.status === 'routed') {
-        recordRouting(r.department, r.approvals || []);
-      } else {
-        recordFailure();
-      }
-    }
-
-    logger.info('Batch processing completed', {
-      requestId: req.id,
-      batchId,
-      operation: 'batch_process',
-      total: result.summary.total,
-      successful: result.summary.successful,
-      failed: result.summary.failed,
-      durationMs: duration,
-    });
-
-    // Add batch ID to the response for operator tracking
-    res.status(200).json({
-      status: 'success',
+    res.status(202).json({
+      status: 'accepted',
       data: {
-        batchId,
-        ...result,
+        ...created,
+        message: `Batch ${created.batchId} has been accepted for processing. Use GET /api/batches/${created.batchId} to track progress.`,
       },
     });
   } catch (error) {
+    if (error.statusCode === 429) res.setHeader('Retry-After', '30');
     next(error);
   }
 });

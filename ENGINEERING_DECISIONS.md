@@ -594,6 +594,22 @@ The spec requires: "Design batch processing so large files do not unnecessarily 
 - The JSON body is already parsed by Express (`express.json()` with a 10MB limit), so streaming the parser wouldn't save memory — the JSON is already in memory
 - Configurable chunk size (default 100, injectable for testing)
 
+> **SUPERSEDED — actual implementation (see Decision log addendum):** as batch
+> durability requirements grew, the HTTP batch path moved to **Option C**:
+> `POST /api/batches` → persistent batch state in SQLite → BullMQ + Redis job
+> carrying `{ batchId }` only → worker with **chunk checkpoints**
+> (`PENDING → PROCESSING → DONE`, atomic claim, lease recovery, bulk persist
+> via `persistChunkAndMarkDone`) → progress/results API. The pure
+> `processBatch()` helper above remains as unit-tested domain logic, but it is
+> no longer wired into any HTTP route — the worker is the single runtime
+> batch implementation. Mental model: **Redis/BullMQ = durable work
+> ("what needs to happen"), database = durable batch/application state and
+> results ("what happened"), chunk checkpoints = recovery optimization
+> (skip DONE work, recompute at most the unfinished chunk), parcel-level
+> `UNIQUE(batch_id, parcel_id)` = final idempotency safeguard. Worker chunk
+> size defaults to `BATCH_CHUNK_SIZE` (500) with lease `CHUNK_LEASE_MS`
+> (5 min, matching the BullMQ lock duration).
+
 ### Key Implementation Details
 - `processBatch()` in `batchProcessor.js` accepts an `onProgress` callback
 - Each parcel is validated and routed independently (mixed-validity handling)

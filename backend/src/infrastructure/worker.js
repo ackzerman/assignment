@@ -29,7 +29,7 @@ const { routeParcel } = require('../domain/routingEngine');
 // Namespace import so tests can inject failures via jest.spyOn(db, ...).
 const db = require('./database');
 const { logger } = require('../observability/logger');
-const { recordRouting, recordFailure, recordBatch, recordJobCompleted, recordJobFailed, recordJobRetry, setWorkerActiveJobs } = require('../observability/metrics');
+const { recordRouting, recordFailure, recordBatch, recordError, recordJobCompleted, recordJobFailed, recordJobRetry, workerJobStarted, workerJobFinished } = require('../observability/metrics');
 const { QUEUE_NAME, DEFAULT_REDIS_CONFIG } = require('./queue');
 
 const DEFAULT_CHUNK_SIZE = parseInt(process.env.BATCH_CHUNK_SIZE || '500', 10) || 500;
@@ -43,7 +43,7 @@ let worker = null;
  * @param {object} [options]
  * @param {object} [options.connection] - Redis connection config
  * @param {number} [options.concurrency] - Number of concurrent jobs (default: 1)
- * @param {number} [options.chunkSize] - Parcels per processing chunk (default: 100)
+ * @param {number} [options.chunkSize] - Parcels per checkpoint chunk (default: BATCH_CHUNK_SIZE or 500)
  * @returns {Worker} The BullMQ worker instance
  */
 function createWorker(options = {}) {
@@ -54,14 +54,15 @@ function createWorker(options = {}) {
   worker = new Worker(
     QUEUE_NAME,
     async (job) => {
-      setWorkerActiveJobs(1);
+      // Increment/decrement (not set 1/0) so concurrent jobs are counted correctly.
+      workerJobStarted();
       const started = Date.now();
       try {
         const result = await processBatchJob(job, chunkSize, { leaseMs: DEFAULT_CHUNK_LEASE_MS });
         recordJobCompleted(Date.now() - started);
         return result;
       } finally {
-        setWorkerActiveJobs(0);
+        workerJobFinished();
       }
     },
     {
@@ -136,59 +137,80 @@ function createWorker(options = {}) {
 }
 
 /**
- * Core batch job processor.
- * Called by the BullMQ worker for each job.
+ * Core batch job processor with chunk-level checkpointing (see header).
  *
- * Flow:
- * 1. Load batch data from DB
- * 2. Update status to PROCESSING
- * 3. Process parcels in chunks
- * 4. For each parcel: validate → route → collect result
- * 5. Persist chunk results to DB (transactional)
- * 6. Update batch progress
- * 7. Final status: COMPLETED or COMPLETED_WITH_ERRORS
+ * Error semantics:
+ * - EXPECTED parcel failures (invalid input → validateParcelInput returns
+ *   errors) become per-parcel 'invalid' results; the batch continues and
+ *   finalizes as COMPLETED_WITH_ERRORS.
+ * - UNEXPECTED failures (database outage, routing-engine bug, programming
+ *   exceptions) propagate: the active chunk claim is released back to
+ *   PENDING, the system error metric is recorded, and the throw lets the
+ *   BullMQ retry mechanism work. They are NEVER converted into parcel rows.
  *
- * @param {object} job - BullMQ job
- * @param {number} chunkSize - Parcels per chunk
- * @returns {object} Processing summary
+ * @param {object} job - BullMQ job with data { batchId }
+ * @param {number} [chunkSize] - Used only to create checkpoints for legacy
+ *   batches that predate checkpointing; otherwise stored chunks rule.
+ * @param {object} [options]
+ * @param {number} [options.leaseMs] - Chunk claim lease duration
+ * @param {string} [options.workerId] - Identity recorded on claimed chunks
+ * @returns {object} Processing summary (batch-level totals from the DB)
  */
-async function processBatchJob(job, chunkSize) {
+async function processBatchJob(job, chunkSize = DEFAULT_CHUNK_SIZE, options = {}) {
   const { batchId } = job.data;
+  const leaseMs = options.leaseMs ?? DEFAULT_CHUNK_LEASE_MS;
+  const executionId = options.workerId || `${job.id || 'local'}:${randomUUID().split('-')[0]}`;
 
   logger.info('Processing batch job', {
     jobId: job.id,
     batchId,
-    workerId: worker?.id,
+    workerId: worker?.id || executionId,
   });
 
   // Step 1: Load batch data from DB
-  const parcels = getBatchData(batchId);
+  const parcels = db.getBatchData(batchId);
   if (!parcels) {
     throw new Error(`Batch data not found for batchId: ${batchId}`);
   }
 
-  // Step 2: Mark batch as PROCESSING
-  updateBatchStatus(batchId, 'PROCESSING', {
-    startedAt: new Date().toISOString(),
-  });
+  const batch = db.getBatch(batchId);
+  if (!batch) {
+    throw new Error(`Batch record not found for batchId: ${batchId}`);
+  }
 
-  let totalSuccessful = 0;
-  let totalFailed = 0;
+  // Step 2: Mark batch as PROCESSING on first execution only.
+  if (batch.status === 'QUEUED') {
+    db.updateBatchStatus(batchId, 'PROCESSING', {
+      startedAt: new Date().toISOString(),
+    });
+  }
 
-  // Step 3: Process in chunks
-  for (let i = 0; i < parcels.length; i += chunkSize) {
-    const chunk = parcels.slice(i, i + chunkSize);
-    const chunkResults = [];
-    let chunkSuccessful = 0;
-    let chunkFailed = 0;
+  // Checkpoints for legacy batches; normally pre-created at batch creation.
+  db.ensureChunksForBatch(batchId, parcels.length, chunkSize);
 
-    // Step 4: Process each parcel through the shared domain core
-    for (let j = 0; j < chunk.length; j++) {
-      const index = i + j;
-      const parcelData = chunk[j];
-      const parcelId = parcelData.parcelId || `P${index + 1}`;
+  // Step 3: Claim → process → checkpoint loop. DONE chunks are skipped.
+  // Unexpected failures release our active claim and propagate (see catch).
+  let chunksCompletedByThisExecution = 0;
+  let activeChunk = null;
 
-      try {
+  try {
+    for (;;) {
+      const chunk = db.claimNextChunk(batchId, executionId, leaseMs);
+      if (!chunk) break;
+      activeChunk = chunk;
+
+      const chunkResults = [];
+      let chunkSuccessful = 0;
+      let chunkFailed = 0;
+
+      // Step 4: Process each parcel through the shared domain core (in memory).
+      // EXPECTED failures (invalid input) are returned as 'invalid' results
+      // and counted below. UNEXPECTED exceptions (DB outage, engine bug)
+      // propagate to the catch — never converted into parcel rows.
+      for (let index = chunk.startIndex; index < chunk.endIndex; index++) {
+        const parcelData = parcels[index];
+        const parcelId = parcelData?.parcelId || `P${index + 1}`;
+
         const result = processOneParcel(batchId, parcelId, parcelData, index);
         chunkResults.push(result);
 
@@ -200,70 +222,114 @@ async function processBatchJob(job, chunkSize) {
           chunkFailed++;
           recordFailure();
         }
-      } catch (err) {
-        // Unexpected error — still don't crash the batch
-        chunkResults.push({
+      }
+
+      // Step 5: Bulk persist + mark DONE atomically.
+      // If this throws (crash), the chunk stays PROCESSING with a live lease
+      // (another execution recovers it after expiry) and parcel-level
+      // idempotency absorbs any partially persisted rows on recompute.
+      const { duplicates } = db.persistChunkAndMarkDone(
+        batchId,
+        chunk.chunkIndex,
+        chunkResults,
+        chunkSuccessful,
+        chunkFailed,
+      );
+
+      if (duplicates > 0) {
+        logger.warn('Duplicate parcel results detected (idempotency)', {
           batchId,
-          parcelId,
-          index,
-          status: 'error',
-          errors: [{ field: '_system', message: `Unexpected error: ${err.message}` }],
+          chunkIndex: chunk.chunkIndex,
+          duplicates,
         });
-        chunkFailed++;
-        recordFailure();
+      }
+
+      chunksCompletedByThisExecution++;
+      activeChunk = null;
+
+      // Update job progress for BullMQ monitoring from DB-derived progress.
+      const current = db.getBatch(batchId);
+      if (job.updateProgress && current) {
+        await job.updateProgress(current.progress);
+      }
+
+      // Yield to the event loop between chunks.
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  } catch (err) {
+    // UNEXPECTED failure: release our still-held claim so a retry can reclaim
+    // this chunk immediately (no-op if already DONE or owned elsewhere),
+    // record a system error (not a parcel failure), and propagate so the
+    // queue retry mechanism works.
+    if (activeChunk) {
+      try {
+        db.releaseChunk(batchId, activeChunk.chunkIndex, executionId);
+      } catch (releaseErr) {
+        logger.warn('Failed to release chunk claim after error', {
+          batchId,
+          chunkIndex: activeChunk.chunkIndex,
+          error: releaseErr.message,
+        });
       }
     }
+    recordError();
+    throw err;
+  }
 
-    // Step 5: Persist chunk results to DB (transactional, idempotent)
-    const { inserted, duplicates } = saveParcelResultsBatch(chunkResults);
+  // Step 6: Finalize only when every chunk is DONE. If chunks remain
+  // PROCESSING under another live worker, this execution returns current
+  // totals without finalizing; the active worker will finalize.
+  const final = db.getBatch(batchId);
+  const { totalChunks, completedChunks } = db.getChunkProgress(batchId);
 
-    if (duplicates > 0) {
-      logger.warn('Duplicate parcel results detected (idempotency)', {
-        batchId,
-        chunkStart: i,
-        duplicates,
+  if (totalChunks > 0 && completedChunks === totalChunks) {
+    const finalStatus = final.failed > 0 ? 'COMPLETED_WITH_ERRORS' : 'COMPLETED';
+    if (final.status === 'PROCESSING' || final.status === 'QUEUED') {
+      db.updateBatchStatus(batchId, finalStatus, {
+        completedAt: new Date().toISOString(),
       });
     }
 
-    // Step 6: Update batch progress in DB
-    totalSuccessful += chunkSuccessful;
-    totalFailed += chunkFailed;
-    updateBatchProgress(batchId, chunk.length, chunkSuccessful, chunkFailed);
+    // Record batch metrics once per completed batch.
+    recordBatch({ total: final.total, successful: final.successful, failed: final.failed });
 
-    // Update job progress for BullMQ monitoring
-    const processed = Math.min(i + chunkSize, parcels.length);
-    await job.updateProgress(Math.round((processed / parcels.length) * 100));
+    const summary = {
+      batchId,
+      status: finalStatus,
+      total: final.total,
+      successful: final.successful,
+      failed: final.failed,
+    };
 
-    // Yield to event loop between chunks
-    if (i + chunkSize < parcels.length) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
+    logger.info('Batch processing complete', {
+      ...summary,
+      workerId: worker?.id || executionId,
+      jobId: job.id,
+      chunksCompletedByThisExecution,
+    });
+
+    return summary;
   }
 
-  // Step 7: Final status
-  const finalStatus = totalFailed > 0 ? 'COMPLETED_WITH_ERRORS' : 'COMPLETED';
-  updateBatchStatus(batchId, finalStatus, {
-    completedAt: new Date().toISOString(),
-  });
-
-  // Record batch metrics
-  recordBatch({ total: parcels.length, successful: totalSuccessful, failed: totalFailed });
-
-  const summary = {
+  const partial = db.getBatch(batchId);
+  logger.info('Batch job execution yielded; chunks remain for other workers', {
     batchId,
-    status: finalStatus,
-    total: parcels.length,
-    successful: totalSuccessful,
-    failed: totalFailed,
-  };
-
-  logger.info('Batch processing complete', {
-    ...summary,
-    workerId: worker?.id,
     jobId: job.id,
+    workerId: worker?.id || executionId,
+    totalChunks,
+    completedChunks,
+    chunksCompletedByThisExecution,
   });
 
-  return summary;
+  return {
+    batchId,
+    status: partial.status,
+    total: partial.total,
+    successful: partial.successful,
+    failed: partial.failed,
+    totalChunks,
+    completedChunks,
+  };
 }
 
 /**
@@ -340,4 +406,6 @@ module.exports = {
   getWorker,
   processBatchJob, // Exported for integration testing (in-memory DB + mock job)
   processOneParcel, // Exported for unit testing
+  DEFAULT_CHUNK_SIZE,
+  DEFAULT_CHUNK_LEASE_MS,
 };

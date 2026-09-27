@@ -520,6 +520,26 @@ function claimNextChunk(batchId, workerId, leaseMs = getDefaultChunkLeaseMs()) {
 }
 
 /**
+ * Releases a worker's own PROCESSING claim back to PENDING so a retry can
+ * reclaim it immediately (instead of waiting for lease expiry).
+ *
+ * Only releases when the chunk is still PROCESSING under this worker — never
+ * touches DONE chunks or chunks owned by another live worker. Safe to call
+ * after a crash window where nothing was durably persisted.
+ *
+ * @returns {boolean} true if the claim was released
+ */
+function releaseChunk(batchId, chunkIndex, workerId) {
+  const info = db.prepare(`
+    UPDATE batch_chunks
+    SET status = 'PENDING', worker_id = NULL, claimed_at = NULL, lease_expires_at = NULL
+    WHERE batch_id = ? AND chunk_index = ? AND status = 'PROCESSING' AND worker_id = ?
+  `).run(batchId, chunkIndex, workerId);
+
+  return info.changes > 0;
+}
+
+/**
  * Bulk-persists a chunk's results and marks the chunk DONE in ONE transaction.
  *
  * The chunk reaches DONE only after its results are durably stored, so a
@@ -702,6 +722,7 @@ module.exports = {
   getChunkProgress,
   claimChunk,
   claimNextChunk,
+  releaseChunk,
   persistChunkAndMarkDone,
   getBatchResults,
   getBatchResultCount,

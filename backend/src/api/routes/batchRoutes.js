@@ -27,6 +27,7 @@ const {
   getBatchResults,
   getBatchResultCount,
   listBatches,
+  updateBatchStatus,
 } = require('../../infrastructure/database');
 const { addBatchJob, getQueueHealth, MAX_QUEUE_DEPTH } = require('../../infrastructure/queue');
 const { authOptional, isAuthEnabled } = require('../middleware/auth');
@@ -52,6 +53,108 @@ function enforceOwnership(req, batch) {
 }
 
 /**
+ * Canonical batch creation path shared by POST /api/batches and the legacy
+ * POST /api/parcels/batch alias (single implementation, no duplication).
+ *
+ * Steps: backpressure check → create durable DB record (owner + chunk
+ * checkpoints) → enqueue BullMQ job carrying { batchId } only.
+ *
+ * Queue→DB failure window: if queue submission fails after the DB record was
+ * created, the batch is marked FAILED (never left falsely QUEUED) and a 503
+ * is thrown so the API reports the failure instead of a false acceptance.
+ *
+ * @param {Array} parcels - Validated parcel inputs
+ * @param {object} [options]
+ * @param {string} [options.owner] - Owner identity for authorization
+ * @param {string} [options.requestId] - Request ID for log correlation
+ * @returns {Promise<{ batchId: string, status: string, total: number }>}
+ * @throws {AppError} 429 on backpressure, 503 when the queue is unavailable
+ */
+async function enqueueBatch(parcels, { owner = 'anonymous', requestId } = {}) {
+  // Backpressure — refuse when durable work is piling up.
+  // Fail-open when the queue is unavailable (dev/test without Redis): log and continue.
+  try {
+    const health = await getQueueHealth();
+    if (health.connected) {
+      setQueueDepth(health.depth || 0);
+      if ((health.depth || 0) >= MAX_QUEUE_DEPTH) {
+        logger.warn('Batch rejected due to backpressure', {
+          requestId,
+          depth: health.depth,
+          max: MAX_QUEUE_DEPTH,
+        });
+        throw new AppError(
+          `Server is busy (queue depth ${health.depth}). Try again later.`,
+          429,
+        );
+      }
+    }
+  } catch (err) {
+    if (err.statusCode === 429) throw err;
+    logger.warn('Queue health check unavailable, accepting batch anyway', {
+      requestId,
+      error: err.message,
+    });
+  }
+
+  const batchId = `BATCH-${randomUUID().split('-')[0]}`;
+
+  // Assign parcel IDs if not provided (duplicates already rejected by validation)
+  const parcelsWithIds = parcels.map((p, i) => ({
+    ...p,
+    parcelId: p.parcelId || `P${i + 1}`,
+  }));
+
+  logger.info('Creating batch', {
+    requestId,
+    batchId,
+    parcelCount: parcels.length,
+    owner,
+  });
+
+  // Create batch record in DB (durable state, with owner + chunk checkpoints)
+  createBatch(batchId, parcels.length, parcelsWithIds, owner);
+
+  // Add job to queue (durable work). Payload is small: just { batchId }.
+  try {
+    await addBatchJob(batchId);
+  } catch (err) {
+    // DB succeeded but the queue did not: do NOT leave the batch falsely
+    // QUEUED. Mark it FAILED so persisted state reflects reality.
+    try {
+      updateBatchStatus(batchId, 'FAILED', {
+        completedAt: new Date().toISOString(),
+        error: `Queue submission failed: ${err.message}`,
+      });
+    } catch (dbErr) {
+      logger.error('Failed to mark batch after queue submission failure', {
+        requestId,
+        batchId,
+        error: dbErr.message,
+      });
+    }
+    logger.error('Batch queue submission failed', {
+      requestId,
+      batchId,
+      error: err.message,
+    });
+    throw new AppError(
+      `Batch could not be queued for processing: ${err.message}`,
+      503,
+    );
+  }
+
+  logger.info('Batch queued for processing', {
+    requestId,
+    batchId,
+    parcelCount: parcels.length,
+    owner,
+  });
+
+  return { batchId, status: 'QUEUED', total: parcels.length };
+}
+
+/**
  * POST /api/batches
  *
  * Creates a new batch for asynchronous processing.
@@ -59,7 +162,7 @@ function enforceOwnership(req, batch) {
  */
 router.post('/', async (req, res, next) => {
   try {
-    // Step 1: Validate the batch envelope
+    // Step 1: Validate the batch envelope (incl. duplicate parcel IDs)
     const batchValidation = validateBatchInput(req.body);
     if (!batchValidation.valid) {
       logger.warn('Batch validation failed', {
@@ -69,76 +172,22 @@ router.post('/', async (req, res, next) => {
       throw new AppError(batchValidation.error, 400);
     }
 
-    // Step 2: Backpressure — refuse when durable work is piling up (Master: Backpressure).
-    // Fail-open when the queue is unavailable (dev/test without Redis): log and continue.
-    try {
-      const health = await getQueueHealth();
-      if (health.connected) {
-        setQueueDepth(health.depth || 0);
-        if ((health.depth || 0) >= MAX_QUEUE_DEPTH) {
-          logger.warn('Batch rejected due to backpressure', {
-            requestId: req.id,
-            depth: health.depth,
-            max: MAX_QUEUE_DEPTH,
-          });
-          res.setHeader('Retry-After', '30');
-          throw new AppError(
-            `Server is busy (queue depth ${health.depth}). Try again later.`,
-            429,
-          );
-        }
-      }
-    } catch (err) {
-      if (err.statusCode === 429) throw err;
-      logger.warn('Queue health check unavailable, accepting batch anyway', {
-        requestId: req.id,
-        error: err.message,
-      });
-    }
-
-    // Step 3: Generate a unique batch ID
-    const batchId = `BATCH-${randomUUID().split('-')[0]}`;
-    const parcels = batchValidation.parcels;
     const owner = req.user?.id || 'anonymous';
-
-    // Assign parcel IDs if not provided
-    const parcelsWithIds = parcels.map((p, i) => ({
-      ...p,
-      parcelId: p.parcelId || `P${i + 1}`,
-    }));
-
-    logger.info('Creating batch', {
-      requestId: req.id,
-      batchId,
-      parcelCount: parcels.length,
+    const created = await enqueueBatch(batchValidation.parcels, {
       owner,
+      requestId: req.id,
     });
 
-    // Step 4: Create batch record in DB (durable state, with owner)
-    createBatch(batchId, parcels.length, parcelsWithIds, owner);
-
-    // Step 5: Add job to queue (durable work)
-    // Payload is small: just { batchId }. Worker reads data from DB.
-    await addBatchJob(batchId);
-
-    logger.info('Batch queued for processing', {
-      requestId: req.id,
-      batchId,
-      parcelCount: parcels.length,
-      owner,
-    });
-
-    // Step 6: Return 202 Accepted
+    // Step 2: Return 202 Accepted
     res.status(202).json({
       status: 'accepted',
       data: {
-        batchId,
-        status: 'QUEUED',
-        total: parcels.length,
-        message: `Batch ${batchId} has been accepted for processing. Use GET /api/batches/${batchId} to track progress.`,
+        ...created,
+        message: `Batch ${created.batchId} has been accepted for processing. Use GET /api/batches/${created.batchId} to track progress.`,
       },
     });
   } catch (error) {
+    if (error.statusCode === 429) res.setHeader('Retry-After', '30');
     next(error);
   }
 });
@@ -237,3 +286,4 @@ router.get('/:batchId/results', (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.enqueueBatch = enqueueBatch;
