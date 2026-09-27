@@ -193,7 +193,7 @@ export default function BatchResults({ data }) {
               <th>#</th>
               <th>Status</th>
               <th>Department</th>
-              <th>Insurance</th>
+              <th>Approvals</th>
               <th>Details</th>
             </tr>
           </thead>
@@ -273,14 +273,20 @@ export default function BatchResults({ data }) {
                   <span className="detail-key">Country:</span>
                   <span>{(r.parcel || r.inputSummary)?.destinationCountry || '—'}</span>
                 </div>
-                {/* Internal rule IDs are intentionally NOT shown;
-                    human-readable reasons below are the operator view. */}
-                {r.approvals && r.approvals.length > 0 && (
+                {/* Internal rule IDs are intentionally NOT shown.
+                    Each approval renders generically with its own reason. */}
+                {normalizeApprovals(r.approvals).length > 0 && (
                   <div className="detail-approvals">
                     <span className="detail-key">Approvals:</span>
                     <ul>
-                      {r.approvals.map((a, i) => (
-                        <li key={i}>{a.type}: {a.reason}</li>
+                      {normalizeApprovals(r.approvals).map((a, i) => (
+                        <li key={i}>
+                          <strong>✓ {a.type}</strong>{' '}
+                          <span className="approval-badge required">Required</span>
+                          {a.reason ? (
+                            <div className="reason-text">{a.reason}</div>
+                          ) : null}
+                        </li>
                       ))}
                     </ul>
                   </div>

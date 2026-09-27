@@ -1,40 +1,46 @@
 import { describe, it, expect } from 'vitest';
-import { approvalTypeOf, hasInsuranceApproval } from './approvals.js';
+import { normalizeApprovals } from './approvals.js';
 
-describe('hasInsuranceApproval', () => {
-  it('no approvals → Insurance not required', () => {
-    expect(hasInsuranceApproval([])).toBe(false);
-    expect(hasInsuranceApproval(undefined)).toBe(false);
-    expect(hasInsuranceApproval(null)).toBe(false);
+describe('normalizeApprovals (generic approval rendering)', () => {
+  it('no approvals → empty list ("No additional approval required.")', () => {
+    expect(normalizeApprovals([])).toEqual([]);
+    expect(normalizeApprovals(undefined)).toEqual([]);
+    expect(normalizeApprovals(null)).toEqual([]);
   });
 
-  it('Insurance approval (object form) → Insurance required', () => {
-    expect(hasInsuranceApproval([{ type: 'Insurance', reason: 'Value exceeds €1,000.' }])).toBe(true);
-  });
-
-  it('Insurance approval (string form) → Insurance required', () => {
-    expect(hasInsuranceApproval(['Insurance'])).toBe(true);
-  });
-
-  it('Manual Review only → Insurance NOT required', () => {
-    expect(hasInsuranceApproval([{ type: 'Manual Review', reason: 'Value exceeds €5,000.' }])).toBe(false);
-    expect(hasInsuranceApproval(['Manual Review'])).toBe(false);
-  });
-
-  it('multiple approvals including Insurance → Insurance required', () => {
+  it('one approval renders with type and reason', () => {
     expect(
-      hasInsuranceApproval([
+      normalizeApprovals([{ type: 'Insurance', reason: 'Value exceeds €1,000.' }]),
+    ).toEqual([{ type: 'Insurance', reason: 'Value exceeds €1,000.' }]);
+  });
+
+  it('multiple approvals all render', () => {
+    expect(
+      normalizeApprovals([
         { type: 'Insurance', reason: 'Value exceeds €1,000.' },
         { type: 'Manual Review', reason: 'Value exceeds €5,000.' },
       ]),
-    ).toBe(true);
+    ).toEqual([
+      { type: 'Insurance', reason: 'Value exceeds €1,000.' },
+      { type: 'Manual Review', reason: 'Value exceeds €5,000.' },
+    ]);
   });
-});
 
-describe('approvalTypeOf', () => {
-  it('passes strings through and reads object types', () => {
-    expect(approvalTypeOf('Insurance')).toBe('Insurance');
-    expect(approvalTypeOf({ type: 'Manual Review' })).toBe('Manual Review');
-    expect(approvalTypeOf(undefined)).toBeUndefined();
+  it('a future approval type renders without code changes', () => {
+    expect(
+      normalizeApprovals([
+        { type: 'Manager Approval', reason: 'High-value parcel requires manager review.' },
+      ]),
+    ).toEqual([
+      { type: 'Manager Approval', reason: 'High-value parcel requires manager review.' },
+    ]);
+  });
+
+  it('accepts plain type strings and fills missing reasons', () => {
+    expect(normalizeApprovals(['Insurance'])).toEqual([{ type: 'Insurance', reason: '' }]);
+  });
+
+  it('drops entries without a usable type', () => {
+    expect(normalizeApprovals([null, {}, { reason: 'no type' }, { type: '', reason: 'x' }])).toEqual([]);
   });
 });

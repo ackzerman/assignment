@@ -3,7 +3,7 @@
  *
  * Design Decisions:
  * - Department is shown prominently with a color-coded badge
- * - Reasons are displayed in natural language (not JSON)
+ * - Department reason is displayed in natural language (not JSON)
  * - Approvals render generically from backend data (any approval type)
  * - Parcel details are summarized for confirmation
  *
@@ -58,7 +58,8 @@ export default function RoutingResult({ result }) {
       </div>
 
       {/* Approvals: generic, data-driven. Every backend approval type
-          renders automatically — no per-type UI logic. */}
+          renders automatically — no per-type UI logic. Listed approvals
+          are all required; that is why they were returned. */}
       <div className="result-section">
         <div className="result-label">Approvals</div>
         <div className="result-value">
@@ -66,7 +67,8 @@ export default function RoutingResult({ result }) {
             <ul className="approvals-list">
               {approvals.map((approval, index) => (
                 <li key={index}>
-                  <strong>✓ {approval.type}</strong>
+                  <strong>✓ {approval.type}</strong>{' '}
+                  <span className="approval-badge required">Required</span>
                   {approval.reason ? (
                     <div className="reason-text">{approval.reason}</div>
                   ) : null}
@@ -78,22 +80,6 @@ export default function RoutingResult({ result }) {
           )}
         </div>
       </div>
-
-      {/* Reasons: human-readable explanations (internal rule IDs are
-          intentionally NOT shown to operators) */}
-
-      {result.reasons && result.reasons.length > 0 && (
-        <div className="result-section">
-          <div className="result-label">Reasons</div>
-          <div className="result-value">
-            <ul className="approvals-list">
-              {result.reasons.map((reason, index) => (
-                <li key={index} className="reason-text">{reason}</li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      )}
 
       {/* Parcel Summary */}
       <div className="result-section parcel-summary">
