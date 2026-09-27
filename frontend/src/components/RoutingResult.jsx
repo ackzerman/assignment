@@ -4,7 +4,7 @@
  * Design Decisions:
  * - Department is shown prominently with a color-coded badge
  * - Reasons are displayed in natural language (not JSON)
- * - Insurance/approvals are clearly labeled as Required or Not Required
+ * - Approvals render generically from backend data (any approval type)
  * - Parcel details are summarized for confirmation
  *
  * This component receives the raw API result and presents it
@@ -18,19 +18,19 @@ const DEPT_COLORS = {
   Heavy: '#f59e0b',    // amber
 };
 
-import { hasInsuranceApproval } from '../approvals';
+import { normalizeApprovals } from '../approvals';
 
 export default function RoutingResult({ result }) {
   if (!result) return null;
 
   const deptColor = DEPT_COLORS[result.department] || '#6b7280';
-  // Master shape returns approvals as string array; legacy returns objects.
-  // Prefer detailed objects when present.
-  const approvalsDetail = result.approvalsDetail
-    || (Array.isArray(result.approvals) && result.approvals.length > 0 && typeof result.approvals[0] === 'object'
-      ? result.approvals
-      : []);
-  const requiresInsurance = hasInsuranceApproval(result.approvalsDetail || result.approvals);
+  // Single canonical representation: every approval renders dynamically.
+  // Prefer detailed objects when present, fall back to the summary shape.
+  const approvals = normalizeApprovals(
+    result.approvalsDetail && result.approvalsDetail.length > 0
+      ? result.approvalsDetail
+      : result.approvals,
+  );
 
   return (
     <div className="routing-result">
@@ -57,45 +57,30 @@ export default function RoutingResult({ result }) {
         </div>
       </div>
 
-      {/* Approvals: Insurance column reflects an Insurance approval
-          specifically — NOT the generic requiresApproval flag (which is
-          also true for e.g. Manual Review). */}
+      {/* Approvals: generic, data-driven. Every backend approval type
+          renders automatically — no per-type UI logic. */}
       <div className="result-section">
-        <div className="result-label">Insurance</div>
+        <div className="result-label">Approvals</div>
         <div className="result-value">
-          {requiresInsurance ? (
-            <span className="approval-badge required">Required</span>
+          {approvals.length > 0 ? (
+            <ul className="approvals-list">
+              {approvals.map((approval, index) => (
+                <li key={index}>
+                  <strong>✓ {approval.type}</strong>
+                  {approval.reason ? (
+                    <div className="reason-text">{approval.reason}</div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
           ) : (
-            <span className="approval-badge not-required">Not Required</span>
+            <span className="reason-text">No additional approval required.</span>
           )}
         </div>
       </div>
 
-      {/* Approval Details */}
-      {approvalsDetail && approvalsDetail.length > 0 && (
-        <div className="result-section">
-          <div className="result-label">Approval Details</div>
-          <div className="result-value">
-            <ul className="approvals-list">
-              {approvalsDetail.map((approval, index) => (
-                <li key={index}>
-                  <strong>{approval.type}:</strong> {approval.reason}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      )}
-
-      {/* Master explainability: matched rules + reasons */}
-      {result.matchedRules && result.matchedRules.length > 0 && (
-        <div className="result-section">
-          <div className="result-label">Matched Rules</div>
-          <div className="result-value">
-            <div className="reason-text">{result.matchedRules.join(', ')}</div>
-          </div>
-        </div>
-      )}
+      {/* Reasons: human-readable explanations (internal rule IDs are
+          intentionally NOT shown to operators) */}
 
       {result.reasons && result.reasons.length > 0 && (
         <div className="result-section">

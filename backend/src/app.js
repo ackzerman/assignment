@@ -48,8 +48,12 @@ app.use(createHelmetMiddleware());
 app.use(createCorsMiddleware());
 
 // --- 4. Rate Limiting ---
+// The strict batch-creation limiter applies ONLY to POST /api/batches
+// (each creation enqueues expensive worker capacity). GET status/results
+// polling uses the general API limiter — otherwise a normal batch taking
+// longer than ~10 polls would 429 legitimate frontend polling.
 app.use('/api/', createGeneralRateLimiter());
-app.use('/api/batches', createBatchRateLimiter());
+app.post('/api/batches', createBatchRateLimiter());
 
 // --- 5. Body Parsing ---
 app.use(express.json({ limit: '10mb' }));

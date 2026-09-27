@@ -108,8 +108,9 @@ function parseStrictNumber(raw) {
 }
 
 /**
- * Weight must be a positive number (> 0).
- * Rejects: missing, non-numeric, zero, negative.
+ * Weight must be a positive, finite number (> 0).
+ * Rejects: missing, non-numeric, non-finite, zero, negative.
+ * No upper bound: the routing rules (Mail/Regular/Heavy) cover all weights.
  */
 function validateWeight(weight, errors) {
   if (weight === undefined || weight === null) {
@@ -119,7 +120,7 @@ function validateWeight(weight, errors) {
 
   const parsed = parseStrictNumber(weight);
 
-  if (typeof parsed !== 'number' || isNaN(parsed)) {
+  if (typeof parsed !== 'number' || isNaN(parsed) || !isFinite(parsed)) {
     errors.push({
       field: 'weight',
       message: 'Weight must be a valid number.',
@@ -137,23 +138,14 @@ function validateWeight(weight, errors) {
     return undefined;
   }
 
-  // Upper bound to prevent unreasonable values (e.g., typos like 100000 kg)
-  if (parsed > 10000) {
-    errors.push({
-      field: 'weight',
-      message: 'Weight must not exceed 10,000 kg.',
-      value: weight,
-    });
-    return undefined;
-  }
-
   return parsed;
 }
 
 /**
- * Value must be a non-negative number (>= 0).
- * Rejects: missing, non-numeric, negative.
+ * Value must be a finite, non-negative number (>= 0).
+ * Rejects: missing, non-numeric, non-finite, negative.
  * Zero is valid (a parcel can have no declared value).
+ * No upper bound: approval rules apply at any value (e.g. Insurance).
  */
 function validateValue(value, errors) {
   if (value === undefined || value === null) {
@@ -163,7 +155,7 @@ function validateValue(value, errors) {
 
   const parsed = parseStrictNumber(value);
 
-  if (typeof parsed !== 'number' || isNaN(parsed)) {
+  if (typeof parsed !== 'number' || isNaN(parsed) || !isFinite(parsed)) {
     errors.push({
       field: 'value',
       message: 'Value must be a valid number.',
@@ -176,16 +168,6 @@ function validateValue(value, errors) {
     errors.push({
       field: 'value',
       message: 'Value must not be negative.',
-      value: value,
-    });
-    return undefined;
-  }
-
-  // Upper bound to prevent unreasonable values
-  if (parsed > 1000000) {
-    errors.push({
-      field: 'value',
-      message: 'Value must not exceed €1,000,000.',
       value: value,
     });
     return undefined;

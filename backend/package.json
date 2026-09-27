@@ -25,6 +25,7 @@
     "ioredis-mock": "^8.13.1",
     "jest": "^30.5.2",
     "nodemon": "^3.1.14",
+    "redis-memory-server": "^0.17.1",
     "supertest": "^7.3.0"
   }
 }

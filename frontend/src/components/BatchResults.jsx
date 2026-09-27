@@ -20,7 +20,7 @@
 import { useState, useEffect } from 'react';
 import { fetchBatchResults } from '../api';
 import { PAGE_SIZE, pageCountFor, clampPage } from '../pagination';
-import { hasInsuranceApproval } from '../approvals';
+import { normalizeApprovals } from '../approvals';
 
 // Department display colors (same as RoutingResult)
 const DEPT_COLORS = {
@@ -220,10 +220,12 @@ export default function BatchResults({ data }) {
                 </td>
                 <td>
                   {r.status === 'routed' ? (
-                    hasInsuranceApproval(r.approvals) ? (
-                      <span className="approval-badge-sm required">Required</span>
+                    normalizeApprovals(r.approvals).length > 0 ? (
+                      <span className="approval-badge-sm required">
+                        {normalizeApprovals(r.approvals).map((a) => a.type).join(', ')}
+                      </span>
                     ) : (
-                      <span className="approval-badge-sm not-required">No</span>
+                      <span className="approval-badge-sm not-required">None</span>
                     )
                   ) : (
                     <span className="na-text">—</span>
@@ -271,16 +273,8 @@ export default function BatchResults({ data }) {
                   <span className="detail-key">Country:</span>
                   <span>{(r.parcel || r.inputSummary)?.destinationCountry || '—'}</span>
                 </div>
-                {r.matchedRules && r.matchedRules.length > 0 && (
-                  <div className="detail-approvals">
-                    <span className="detail-key">Matched rules:</span>
-                    <ul>
-                      {r.matchedRules.map((rule, i) => (
-                        <li key={i}>{rule}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
+                {/* Internal rule IDs are intentionally NOT shown;
+                    human-readable reasons below are the operator view. */}
                 {r.approvals && r.approvals.length > 0 && (
                   <div className="detail-approvals">
                     <span className="detail-key">Approvals:</span>

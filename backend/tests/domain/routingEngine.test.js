@@ -165,6 +165,18 @@ describe('Routing Engine', () => {
       expect(result.department).toBe('Regular');
       expect(result.requiresApproval).toBe(false);
     });
+
+    it('should route very large weight to Heavy (no arbitrary upper bound)', () => {
+      const result = routeParcel(makeParcel({ weight: 20000, value: 10 }));
+      expect(result.department).toBe('Heavy');
+    });
+
+    it('should trigger Insurance for very large value (no arbitrary upper bound)', () => {
+      const result = routeParcel(makeParcel({ weight: 5, value: 2000000 }));
+      expect(result.department).toBe('Regular');
+      expect(result.requiresApproval).toBe(true);
+      expect(result.approvals.map((a) => a.type)).toContain('Insurance');
+    });
   });
 
   // ===========================================================

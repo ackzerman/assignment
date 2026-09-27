@@ -111,12 +111,13 @@ describe('Parcel Validation', () => {
       expectFailure({ ...VALID_INPUT, weight: 0 }, 'weight');
     });
 
-    it('should reject weight exceeding 10,000 kg', () => {
-      expectFailure({ ...VALID_INPUT, weight: 10001 }, 'weight');
+    it('should accept very large weight (no arbitrary upper bound)', () => {
+      expectSuccess({ ...VALID_INPUT, weight: 20000 });
     });
 
-    it('should accept weight at upper bound (10,000 kg)', () => {
-      expectSuccess({ ...VALID_INPUT, weight: 10000 });
+    it('should reject non-finite weight', () => {
+      expectFailure({ ...VALID_INPUT, weight: Infinity }, 'weight');
+      expectFailure({ ...VALID_INPUT, weight: '1e999' }, 'weight');
     });
 
     it('should accept very small positive weight', () => {
@@ -153,12 +154,13 @@ describe('Parcel Validation', () => {
       expectSuccess({ ...VALID_INPUT, value: 0 });
     });
 
-    it('should reject value exceeding €1,000,000', () => {
-      expectFailure({ ...VALID_INPUT, value: 1000001 }, 'value');
+    it('should accept very large value (no arbitrary upper bound)', () => {
+      expectSuccess({ ...VALID_INPUT, value: 2000000 });
     });
 
-    it('should accept value at upper bound (€1,000,000)', () => {
-      expectSuccess({ ...VALID_INPUT, value: 1000000 });
+    it('should reject non-finite value', () => {
+      expectFailure({ ...VALID_INPUT, value: Infinity }, 'value');
+      expectFailure({ ...VALID_INPUT, value: '1e999' }, 'value');
     });
 
     it('should accept value as numeric string', () => {

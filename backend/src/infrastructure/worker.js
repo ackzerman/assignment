@@ -132,10 +132,12 @@ function handleJobFailed(job, err) {
     recordJobRetry();
   }
 
-  // If all retries exhausted, mark batch as FAILED in Redis state.
+  // If all retries exhausted, mark batch as FAILED in Redis state —
+  // guarded so an already-terminal (e.g. COMPLETED) batch is never
+  // overwritten by a stale or duplicate job failure.
   if (job && job.attemptsMade >= (job.opts?.attempts || 3)) {
     recordJobFailed();
-    store.markBatchFailed(
+    store.tryMarkBatchFailed(
       job.data.batchId,
       `Batch processing failed after ${job.attemptsMade} attempts.`,
     ).catch((storeErr) => {
@@ -334,31 +336,40 @@ async function processBatchJob(job, options = {}) {
 
   if (totalChunks > 0 && completedChunks === totalChunks) {
     const finalStatus = final.failed > 0 ? 'COMPLETED_WITH_ERRORS' : 'COMPLETED';
-    if (final.status === 'PROCESSING' || final.status === 'QUEUED') {
-      await store.setBatchStatus(batchId, finalStatus, {
-        completedAt: new Date().toISOString(),
+    // Atomic terminal transition: only the execution that actually flips
+    // the status owns completion accounting. A duplicate/stale execution
+    // observing all-DONE reports current state but records nothing.
+    const transitioned = await store.tryFinalizeBatch(batchId, finalStatus);
+
+    if (transitioned) {
+      // Re-read so batch metrics match the committed final state.
+      const fresh = await store.getBatchState(batchId);
+      recordBatch({ total: fresh.total, successful: fresh.successful, failed: fresh.failed });
+
+      const summary = {
+        batchId,
+        status: finalStatus,
+        total: fresh.total,
+        successful: fresh.successful,
+        failed: fresh.failed,
+      };
+
+      logger.info('Batch processing complete', {
+        ...summary,
+        workerId: worker?.id || executionId,
+        jobId: job.id,
+        chunksCompletedByThisExecution,
       });
+
+      return summary;
     }
 
-    // Record batch metrics once per completed batch.
-    recordBatch({ total: final.total, successful: final.successful, failed: final.failed });
-
-    const summary = {
+    logger.info('Batch already finalized by another execution', {
       batchId,
-      status: finalStatus,
-      total: final.total,
-      successful: final.successful,
-      failed: final.failed,
-    };
-
-    logger.info('Batch processing complete', {
-      ...summary,
-      workerId: worker?.id || executionId,
       jobId: job.id,
-      chunksCompletedByThisExecution,
+      workerId: worker?.id || executionId,
+      status: final.status,
     });
-
-    return summary;
   }
 
   const partial = await store.getBatchState(batchId);

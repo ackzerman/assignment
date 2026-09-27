@@ -135,6 +135,44 @@ const RELEASE_SCRIPT = [
   'return 1',
 ].join('\n');
 
+// Atomic terminal FAILED transition: ONLY from QUEUED/PROCESSING.
+// A COMPLETED / COMPLETED_WITH_ERRORS / FAILED batch is never overwritten,
+// so a stale or duplicate job failure cannot corrupt a finished batch.
+// Returns 1 if transitioned, 0 otherwise.
+const TRY_FAIL_SCRIPT = [
+  "local status = redis.call('hget', KEYS[1], 'status')",
+  "if status ~= 'QUEUED' and status ~= 'PROCESSING' then",
+  '  return 0',
+  'end',
+  "redis.call('hset', KEYS[1], 'status', 'FAILED', 'completedAt', ARGV[1], 'error', ARGV[2])",
+  "redis.call('expire', KEYS[1], ARGV[3])",
+  'return 1',
+].join('\n');
+
+// Atomic terminal COMPLETED transition: ONLY from QUEUED/PROCESSING and
+// ONLY when every chunk is DONE. Returns 1 if this call performed the
+// transition (the caller owns completion accounting), 0 otherwise — so
+// duplicate executions observing all-DONE cannot double-record completion.
+const TRY_COMPLETE_SCRIPT = [
+  "local status = redis.call('hget', KEYS[1], 'status')",
+  "if status ~= 'QUEUED' and status ~= 'PROCESSING' then",
+  '  return 0',
+  'end',
+  "local total = tonumber(redis.call('hlen', KEYS[2]))",
+  'if total == 0 then return 0 end',
+  "local fields = redis.call('hgetall', KEYS[2])",
+  'local completed = 0',
+  'for i = 1, #fields, 2 do',
+  "  if string.sub(fields[i + 1], 1, 4) == 'DONE' then",
+  '    completed = completed + 1',
+  '  end',
+  'end',
+  'if completed ~= total then return 0 end',
+  "redis.call('hset', KEYS[1], 'status', ARGV[1], 'completedAt', ARGV[2])",
+  "redis.call('expire', KEYS[1], ARGV[3])",
+  'return 1',
+].join('\n');
+
 function parseChunkField(raw, chunkIndex) {
   if (raw === undefined || raw === null) return null;
   if (raw === 'PENDING') {
@@ -323,6 +361,9 @@ async function claimChunk(batchId, chunkIndex, workerId, leaseMs = getDefaultChu
   const redis = await getRedisClient();
   const k = keys(batchId);
   const token = mintToken(workerId);
+  // Metadata must record the ACTUAL expiration (now + lease), matching the
+  // PX lease on the lock key — not the claim time.
+  const leaseExpiresAt = Date.now() + leaseMs;
 
   const won = await redis.eval(
     CLAIM_SCRIPT,
@@ -336,7 +377,7 @@ async function claimChunk(batchId, chunkIndex, workerId, leaseMs = getDefaultChu
     chunkIndex,
     leaseMs,
     getBatchTTLSeconds(),
-    Date.now(),
+    leaseExpiresAt,
   );
   if (!won) return null;
 
@@ -471,6 +512,52 @@ async function markBatchFailed(batchId, error) {
 }
 
 /**
+ * Guarded FAILED transition for exhausted job failures (single Lua script).
+ * Transitions QUEUED/PROCESSING → FAILED only; already-terminal batches
+ * (COMPLETED, COMPLETED_WITH_ERRORS, FAILED) are left untouched.
+ *
+ * @returns {boolean} true if this call performed the transition
+ */
+async function tryMarkBatchFailed(batchId, error) {
+  const redis = await getRedisClient();
+  const k = keys(batchId);
+  const transitioned = await redis.eval(
+    TRY_FAIL_SCRIPT,
+    1,
+    k.meta,
+    new Date().toISOString(),
+    error || '',
+    getBatchTTLSeconds(),
+  );
+  return transitioned === 1;
+}
+
+/**
+ * Guarded terminal completion transition for batch finalization (single Lua
+ * script). Transitions QUEUED/PROCESSING → given COMPLETED status only when
+ * every chunk is DONE. Returns true only to the execution that actually
+ * performed the transition, so completion metrics are recorded exactly once.
+ *
+ * @param {string} batchId
+ * @param {string} status - 'COMPLETED' or 'COMPLETED_WITH_ERRORS'
+ * @returns {boolean} true if this call performed the transition
+ */
+async function tryFinalizeBatch(batchId, status) {
+  const redis = await getRedisClient();
+  const k = keys(batchId);
+  const transitioned = await redis.eval(
+    TRY_COMPLETE_SCRIPT,
+    2,
+    k.meta,
+    k.chunks,
+    status,
+    new Date().toISOString(),
+    getBatchTTLSeconds(),
+  );
+  return transitioned === 1;
+}
+
+/**
  * Deletes all temporary keys for a batch (cleanup when queue submission
  * fails, so no falsely-QUEUED state lingers).
  */
@@ -542,6 +629,8 @@ module.exports = {
   checkpointChunk,
   setBatchStatus,
   markBatchFailed,
+  tryMarkBatchFailed,
+  tryFinalizeBatch,
   deleteBatch,
   getBatchResults,
   getBatchResultCount,

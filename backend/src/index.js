@@ -18,7 +18,7 @@
 
 require('dotenv').config();
 const app = require('./app');
-const { pingRedis, closeRedis } = require('./infrastructure/redis');
+const { pingRedis, closeRedis, startEmbeddedRedisIfEnabled } = require('./infrastructure/redis');
 const { initQueue, closeQueue } = require('./infrastructure/queue');
 const { createWorker, closeWorker } = require('./infrastructure/worker');
 const { logger } = require('./observability/logger');
@@ -30,6 +30,13 @@ let server;
 
 async function start() {
   try {
+    // 0. Opt-in local demo Redis (EMBEDDED_REDIS=1) for machines without Redis.
+    // Points REDIS_HOST/PORT at the embedded instance before anything connects.
+    const embedded = await startEmbeddedRedisIfEnabled();
+    const bullMqConnection = embedded
+      ? { host: embedded.host, port: embedded.port, maxRetriesPerRequest: null }
+      : undefined;
+
     // 1. Verify Redis (temporary batch state + queue backend).
     // Start serving anyway when Redis is down so /health/ready can report
     // not_ready; batch creation fails fast with 503 until Redis recovers.
@@ -40,11 +47,11 @@ async function start() {
     }
 
     // 2. Initialize queue (connects to Redis)
-    initQueue();
+    initQueue(bullMqConnection);
     logger.info('Queue ready');
 
     // 3. Start worker (consumes batch jobs from queue)
-    createWorker();
+    createWorker(bullMqConnection ? { connection: bullMqConnection } : undefined);
     logger.info('Worker ready');
 
     // 4. Start HTTP server

@@ -120,6 +120,48 @@ async function closeRedis() {
     }
     logger.info('Redis connection closed');
   }
+  await stopEmbeddedRedis();
+}
+
+let embeddedServer = null;
+
+/**
+ * Starts a local embedded Redis (real redis-server binary, loopback only)
+ * when EMBEDDED_REDIS=1 — for development/demo machines without Redis.
+ * Points REDIS_HOST/PORT at it so the state client AND BullMQ (which reads
+ * env config) both use it. No-op unless explicitly enabled. Opt-in only:
+ * production must provide real Redis via REDIS_URL / REDIS_HOST.
+ *
+ * @returns {{ host: string, port: number } | null}
+ */
+async function startEmbeddedRedisIfEnabled() {
+  if (process.env.EMBEDDED_REDIS !== '1' || embeddedServer) {
+    return embeddedServer ? { host: process.env.REDIS_HOST, port: parseInt(process.env.REDIS_PORT, 10) } : null;
+  }
+  let RedisMemoryServer;
+  try {
+    ({ RedisMemoryServer } = require('redis-memory-server'));
+  } catch {
+    throw new Error('EMBEDDED_REDIS=1 requires the redis-memory-server devDependency (run npm install).');
+  }
+  embeddedServer = new RedisMemoryServer({ instance: {} });
+  const host = await embeddedServer.getHost();
+  const port = await embeddedServer.getPort();
+  process.env.REDIS_HOST = host;
+  process.env.REDIS_PORT = String(port);
+  logger.info('Embedded Redis started (local demo only)', { host, port });
+  return { host, port };
+}
+
+async function stopEmbeddedRedis() {
+  if (embeddedServer) {
+    const instance = embeddedServer;
+    embeddedServer = null;
+    try {
+      await instance.stop();
+    } catch { /* ignore */ }
+    logger.info('Embedded Redis stopped');
+  }
 }
 
 module.exports = {
@@ -127,4 +169,6 @@ module.exports = {
   closeRedis,
   pingRedis,
   setRedisImplementation,
+  startEmbeddedRedisIfEnabled,
+  stopEmbeddedRedis,
 };
