@@ -50,4 +50,29 @@ describe('api client', () => {
     ));
     await expect(createBatch([])).rejects.toMatchObject({ status: 400, validationErrors: [{ field: 'weight' }] });
   });
+
+  it('createBatch forwards the idempotency key header when provided', async () => {
+    fetch.mockResolvedValue(jsonResponse({ status: 'accepted', data: { batchId: 'B1', status: 'QUEUED' } }));
+    await createBatch([{ weight: 1 }], { idempotencyKey: 'key-123' });
+    const [, options] = fetch.mock.calls[0];
+    expect(options.headers['Idempotency-Key']).toBe('key-123');
+  });
+
+  it('createBatch omits the idempotency header when no key is given', async () => {
+    fetch.mockResolvedValue(jsonResponse({ status: 'accepted', data: { batchId: 'B1', status: 'QUEUED' } }));
+    await createBatch([{ weight: 1 }]);
+    const [, options] = fetch.mock.calls[0];
+    expect(options.headers).not.toHaveProperty('Idempotency-Key');
+  });
+
+  it('pollBatchStatus aborts cleanly on signal without further requests', async () => {
+    fetch.mockResolvedValue(jsonResponse({ data: { status: 'PROCESSING', progress: 10 } }));
+    const controller = new AbortController();
+    const pending = pollBatchStatus('B1', { intervalMs: 5, signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    const callsAfterAbort = fetch.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fetch.mock.calls.length).toBe(callsAfterAbort);
+  });
 });

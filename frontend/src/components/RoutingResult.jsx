@@ -106,9 +106,9 @@ export default function RoutingResult({ result }) {
         </div>
       </div>
 
-      {/* Metadata */}
+      {/* Metadata (operator-facing only: no internal rule IDs) */}
       <div className="result-meta">
-        Routed at {new Date(result.routedAt).toLocaleString()} · Rule: {result.departmentRule}
+        Routed at {new Date(result.routedAt).toLocaleString()}
       </div>
     </div>
   );

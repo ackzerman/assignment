@@ -12,7 +12,9 @@
  * - batchFailures: batches that had any failures
  * - totalProcessingTimeMs: cumulative processing time
  * - approvalCounts: count per approval type (Insurance, Manual Review)
- * - errors: count of unexpected errors
+ * - errors: count of unexpected errors (cumulative process total)
+ * - errorTimestamps: when each unexpected error occurred (bounded rolling
+ *   window source — see countRecentErrors)
  *
  * Design Decision: In-memory counters vs Prometheus client library
  * - In-memory is zero-dependency and sufficient for the assessment
@@ -29,6 +31,7 @@ const metrics = {
   totalProcessingTimeMs: 0,
   approvalCounts: {},      // { Insurance: 45, 'Manual Review': 12 }
   errors: 0,
+  errorTimestamps: [],     // epoch ms of each unexpected error (capped)
   // Master Phase 9/12 strict observability
   httpRequests: 0,
   httpErrors: 0,           // responses with status >= 400
@@ -81,10 +84,23 @@ function recordProcessingTime(ms) {
 }
 
 /**
- * Records an unexpected error.
+ * Records an unexpected error (cumulative counter + rolling-window timestamp).
  */
 function recordError() {
   metrics.errors++;
+  metrics.errorTimestamps.push(Date.now());
+  // Bound memory: only recent history matters for spike detection.
+  if (metrics.errorTimestamps.length > 500) {
+    metrics.errorTimestamps.splice(0, metrics.errorTimestamps.length - 500);
+  }
+}
+
+/**
+ * Counts unexpected errors within the trailing window (rolling, not cumulative).
+ */
+function countRecentErrors(windowMs) {
+  const cutoff = Date.now() - windowMs;
+  return metrics.errorTimestamps.filter((t) => t >= cutoff).length;
 }
 
 /**
@@ -167,18 +183,22 @@ function setWorkerActiveJobs(count) {
 function getMetrics() {
   const total = metrics.parcelsProcessed;
   const outcomes = metrics.routingOutcomes;
+  // Department distribution is over SUCCESSFULLY ROUTED parcels only —
+  // validation failures have no department and must not dilute the mix.
+  const routedTotal = Object.values(outcomes).reduce((sum, n) => sum + n, 0);
 
   // Compute department distribution percentages
   const distribution = {};
   for (const [dept, count] of Object.entries(outcomes)) {
     distribution[dept] = {
       count,
-      percentage: total > 0 ? ((count / total) * 100).toFixed(1) + '%' : '0%',
+      percentage: routedTotal > 0 ? ((count / routedTotal) * 100).toFixed(1) + '%' : '0%',
     };
   }
 
   return {
     ...metrics,
+    routedTotal,
     distribution,
     uptime: getUptime(),
     avgProcessingTimeMs: total > 0
@@ -230,6 +250,7 @@ function resetMetrics() {
   metrics.queueDepth = 0;
   metrics.workerActiveJobs = 0;
   metrics.batchProcessingDurationMsTotal = 0;
+  metrics.errorTimestamps = [];
   metrics.startedAt = new Date().toISOString();
 }
 
@@ -239,6 +260,7 @@ module.exports = {
   recordBatch,
   recordProcessingTime,
   recordError,
+  countRecentErrors,
   recordHttpRequest,
   recordJobCompleted,
   recordJobFailed,

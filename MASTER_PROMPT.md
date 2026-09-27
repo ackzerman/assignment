@@ -1108,12 +1108,12 @@ Instead, explicitly design for failure.
 
 ### Batch
 
-Durable queue + persistent DB means:
+Durable queue + temporary Redis state means:
 
 ```text
 API crashes
     ↓
-batch already persisted
+batch state already recorded
     ↓
 queue job remains
     ↓
@@ -1220,8 +1220,6 @@ intentionally anonymous. Do not add JWT/sessions/login.
 Not implemented: there are no users and no private batches, so there is
 nothing to own or scope. Anonymous abuse is handled with rate limiting,
 validation, request/body/batch limits, safe errors, and Redis isolation.
-
-Prevent object-level authorization issues.
 
 ## Secrets
 

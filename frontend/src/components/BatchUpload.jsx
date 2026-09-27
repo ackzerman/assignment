@@ -1,5 +1,5 @@
-import { useState, useRef } from 'react';
-import { createBatch, pollBatchStatus, fetchBatchResults } from '../api';
+import { useState, useRef, useEffect } from 'react';
+import { createBatch, pollBatchStatus, fetchBatchResults, isAbortError } from '../api';
 
 /**
  * BatchUpload — File upload component for batch parcel processing.
@@ -40,6 +40,17 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
   // either re-renders. A ref flips synchronously, guaranteeing a single
   // in-flight POST /api/batches per user action.
   const submittingRef = useRef(false);
+  // AbortController for the in-flight submission+poll: aborted on unmount so
+  // background polling can never update a dead component or a replaced batch.
+  // Aborts are silent — they are user navigation, not application errors.
+  const abortRef = useRef(null);
+
+  // Abort any in-flight batch flow when this component unmounts
+  // (tab switch / navigation). Prevents leaked polling and stale UI updates.
+  useEffect(() => () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }, []);
 
   /**
    * Reads and parses a JSON file.
@@ -148,27 +159,41 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
     if (!parcels || parcels.length === 0 || submittingRef.current) return;
 
     submittingRef.current = true;
+    // One idempotency key per user action: if our own response is lost and
+    // the operator retries, the server returns the original batch instead
+    // of creating a duplicate.
+    const idempotencyKey = crypto.randomUUID();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const { signal } = controller;
     setProcessing(true);
     setProgress({ status: 'QUEUED', processed: 0, total: parcels.length, progress: 0 });
     onClear();
 
     try {
-      const created = await createBatch(parcels);
+      const created = await createBatch(parcels, { signal, idempotencyKey });
       const finalStatus = await pollBatchStatus(created.batchId, {
         intervalMs: 1000,
+        signal,
         onProgress: (batch) => setProgress(batch),
       });
       // Only the count is needed up front; pages load on demand.
-      const firstPage = await fetchBatchResults(created.batchId, { limit: 1 });
+      const firstPage = await fetchBatchResults(created.batchId, { limit: 1, signal });
       onBatchResult({
         batch: finalStatus,
         resultCount: firstPage.resultCount,
       });
     } catch (err) {
+      if (isAbortError(err)) return; // Unmounted/replaced: silent, not a failure.
       onError(err);
     } finally {
-      submittingRef.current = false;
-      setProcessing(false);
+      // Only touch state if this run is still current: after unmount the
+      // cleanup already nulled the ref, so a late finally is a full no-op.
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        submittingRef.current = false;
+        setProcessing(false);
+      }
     }
   }
 

@@ -529,6 +529,26 @@
   color: #991b1b;
 }
 
+/* Failed Batch Banner — prominent terminal-failure state */
+.batch-failed-banner {
+  background: var(--color-error-bg);
+  border: 2px solid var(--color-error);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.batch-failed-banner strong {
+  color: #991b1b;
+  font-size: 1rem;
+}
+
+.batch-failed-banner p {
+  font-size: 0.875rem;
+  color: #991b1b;
+  margin: 4px 0 0;
+}
+
 /* Format Hint */
 .batch-format-hint {
   background: var(--color-bg);

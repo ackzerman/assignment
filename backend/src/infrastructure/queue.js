@@ -23,6 +23,7 @@
 
 const { Queue, Worker, QueueEvents } = require('bullmq');
 const { logger } = require('../observability/logger');
+const { positiveIntOrDefault } = require('../config');
 
 // Redis connection configuration.
 // REDIS_URL is preferred (supports password/TLS params); otherwise host/port.
@@ -56,7 +57,11 @@ const JOB_RETRY_CONFIG = {
 };
 
 // Backpressure: refuse new batches when durable work piles up.
-const MAX_QUEUE_DEPTH = parseInt(process.env.MAX_QUEUE_DEPTH || '100', 10);
+// Validated via shared config helper — NaN/negative/zero fall back safely
+// instead of silently disabling the comparison.
+function getMaxQueueDepth() {
+  return positiveIntOrDefault(process.env.MAX_QUEUE_DEPTH, 100);
+}
 
 let queue = null;
 let queueEvents = null;
@@ -179,6 +184,20 @@ async function closeQueue() {
 }
 
 /**
+ * Returns the BullMQ job for a batch, or null when absent/uninitialized.
+ * Job IDs are deterministic (`batch-{batchId}`), which is what makes
+ * orphan recovery and duplicate detection possible.
+ */
+async function getBatchJob(batchId) {
+  if (!queue) return null;
+  try {
+    return (await queue.getJob(`batch-${batchId}`)) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Returns the raw queue instance (for testing/worker creation).
  */
 function getQueue() {
@@ -188,10 +207,11 @@ function getQueue() {
 module.exports = {
   QUEUE_NAME,
   JOB_RETRY_CONFIG,
-  MAX_QUEUE_DEPTH,
+  getMaxQueueDepth,
   DEFAULT_REDIS_CONFIG,
   initQueue,
   addBatchJob,
+  getBatchJob,
   getQueueHealth,
   closeQueue,
   getQueue,

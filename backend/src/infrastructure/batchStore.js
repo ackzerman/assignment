@@ -29,6 +29,7 @@
 const { getRedisClient } = require('./redis');
 const { randomUUID } = require('crypto');
 const { logger } = require('../observability/logger');
+const { positiveIntOrDefault } = require('../config');
 
 function getBatchTTLSeconds() {
   const parsed = parseInt(process.env.BATCH_TTL_SECONDS || '86400', 10);
@@ -41,8 +42,9 @@ function getDefaultChunkSize() {
 }
 
 function getDefaultChunkLeaseMs() {
-  const parsed = parseInt(process.env.CHUNK_LEASE_MS || '300000', 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 300000;
+  // Must be a safe positive duration: zero/negative/NaN would create
+  // immediately-expiring leases and break worker ownership.
+  return positiveIntOrDefault(process.env.CHUNK_LEASE_MS, 300000);
 }
 
 function getResultsMaxLimit() {
@@ -612,6 +614,99 @@ async function getBatchResultCount(batchId) {
   return redis.hlen(keys(batchId).results);
 }
 
+/**
+ * Lists all batch IDs with temporary state (for startup orphan recovery).
+ * Uses KEYS on the small `batch:*:meta` namespace — acceptable here because
+ * batches are short-lived and few (bounded by submission rate × TTL), never
+ * a large permanent dataset.
+ */
+async function listBatchIds() {
+  const redis = await getRedisClient();
+  const found = await redis.keys('batch:*:meta');
+  const ids = [];
+  for (const key of found) {
+    const m = /^batch:(.+):meta$/.exec(key);
+    if (m) ids.push(m[1]);
+  }
+  return ids;
+}
+
+/**
+ * Stable (key-sorted) JSON serialization for idempotency body hashing:
+ * logically identical payloads hash identically regardless of key order.
+ */
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  const keysSorted = Object.keys(value).sort();
+  return `{${keysSorted.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+}
+
+/**
+ * Hashes a validated parcel array for idempotency comparison.
+ */
+function hashParcelPayload(parcels) {
+  const { createHash } = require('crypto');
+  return createHash('sha256').update(stableStringify(parcels)).digest('hex');
+}
+
+function idempotencyRedisKey(key) {
+  return `idempotency:${key}`;
+}
+
+/**
+ * Atomically claims an idempotency key (SET NX). Returns true when this
+ * caller won the claim and may proceed; false means another request with
+ * the same key is in flight or completed — read the record to decide.
+ */
+async function claimIdempotencyKey(key, ttlSec) {
+  const redis = await getRedisClient();
+  const acquired = await redis.set(
+    idempotencyRedisKey(key),
+    JSON.stringify({ status: 'pending' }),
+    'EX',
+    ttlSec,
+    'NX',
+  );
+  return acquired === 'OK';
+}
+
+/**
+ * Reads an idempotency record: null (absent/expired), { status: 'pending' },
+ * or { status: 'complete', batchId, bodyHash }.
+ */
+async function getIdempotencyRecord(key) {
+  const redis = await getRedisClient();
+  const raw = await redis.get(idempotencyRedisKey(key));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stores the completed idempotency mapping (overwrites our own claim).
+ */
+async function setIdempotencyRecord(key, record, ttlSec) {
+  const redis = await getRedisClient();
+  await redis.set(idempotencyRedisKey(key), JSON.stringify(record), 'EX', ttlSec);
+}
+
+/**
+ * Deletes an idempotency record (cleanup after failures).
+ */
+async function deleteIdempotencyKey(key) {
+  const redis = await getRedisClient();
+  await redis.del(idempotencyRedisKey(key));
+}
+
 module.exports = {
   getBatchTTLSeconds,
   getDefaultChunkSize,
@@ -634,4 +729,10 @@ module.exports = {
   deleteBatch,
   getBatchResults,
   getBatchResultCount,
+  listBatchIds,
+  hashParcelPayload,
+  claimIdempotencyKey,
+  getIdempotencyRecord,
+  setIdempotencyRecord,
+  deleteIdempotencyKey,
 };

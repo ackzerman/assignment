@@ -20,7 +20,7 @@
  * 4. Error count spikes (>5 in metrics window) → possible system issue
  */
 
-const { getMetrics } = require('./metrics');
+const { getMetrics, countRecentErrors } = require('./metrics');
 
 /**
  * Expected department distribution baselines.
@@ -39,7 +39,10 @@ const MIN_SAMPLE_SIZE = 50;
 // Failure rate threshold
 const MAX_FAILURE_RATE_PCT = 20;
 
-// Error count threshold
+// Error spike detection uses a ROLLING time window (not the cumulative
+// process-lifetime error count): N errors clustered recently indicate an
+// ongoing problem; the same N spread over days do not.
+const ERROR_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_ERROR_COUNT = 5;
 
 /**
@@ -52,20 +55,23 @@ function checkForAnomalies() {
   const alerts = [];
 
   const total = metrics.parcelsProcessed;
+  // Department mix is measured over SUCCESSFULLY ROUTED parcels only:
+  // validation failures carry no department and must not distort it.
+  const routedTotal = metrics.routedTotal;
 
-  // --- Check department distribution (only with enough data) ---
-  if (total >= MIN_SAMPLE_SIZE) {
+  // --- Check department distribution (only with enough routed data) ---
+  if (routedTotal >= MIN_SAMPLE_SIZE) {
     for (const [dept, baseline] of Object.entries(BASELINES)) {
       const count = (metrics.routingOutcomes[dept] || 0);
-      const pct = (count / total) * 100;
+      const pct = (count / routedTotal) * 100;
 
       // Alert: department at 0% when expected to have traffic
       if (count === 0 && baseline.expectedPct > 5) {
         alerts.push({
           level: 'critical',
           type: 'missing_department',
-          message: `${dept} department has received 0 parcels out of ${total}. Expected ~${baseline.expectedPct}%.`,
-          data: { department: dept, count, total, expectedPct: baseline.expectedPct },
+          message: `${dept} department has received 0 parcels out of ${routedTotal} routed. Expected ~${baseline.expectedPct}%.`,
+          data: { department: dept, count, total: routedTotal, expectedPct: baseline.expectedPct },
         });
       }
       // Alert: department outside expected range
@@ -73,14 +79,14 @@ function checkForAnomalies() {
         alerts.push({
           level: 'warning',
           type: 'distribution_anomaly',
-          message: `${dept} department is at ${pct.toFixed(1)}% (expected ${baseline.minPct}%-${baseline.maxPct}%). This may indicate a rule change or unusual traffic.`,
+          message: `${dept} department is at ${pct.toFixed(1)}% of routed parcels (expected ${baseline.minPct}%-${baseline.maxPct}%). This may indicate a rule change or unusual traffic.`,
           data: { department: dept, actualPct: pct, minPct: baseline.minPct, maxPct: baseline.maxPct },
         });
       }
     }
   }
 
-  // --- Check failure rate ---
+  // --- Check failure rate (validation failures over all attempts) ---
   if (total >= MIN_SAMPLE_SIZE) {
     const failureRate = (metrics.failedParcels / total) * 100;
     if (failureRate > MAX_FAILURE_RATE_PCT) {
@@ -93,13 +99,14 @@ function checkForAnomalies() {
     }
   }
 
-  // --- Check error count ---
-  if (metrics.errors > MAX_ERROR_COUNT) {
+  // --- Check error spike (rolling window, not cumulative) ---
+  const recentErrors = countRecentErrors(ERROR_WINDOW_MS);
+  if (recentErrors > MAX_ERROR_COUNT) {
     alerts.push({
       level: 'critical',
       type: 'error_spike',
-      message: `${metrics.errors} unexpected errors recorded. Threshold: ${MAX_ERROR_COUNT}. Investigate application logs.`,
-      data: { errors: metrics.errors, threshold: MAX_ERROR_COUNT },
+      message: `${recentErrors} unexpected errors in the last 15 minutes. Threshold: ${MAX_ERROR_COUNT}. Investigate application logs.`,
+      data: { errors: recentErrors, threshold: MAX_ERROR_COUNT, windowMs: ERROR_WINDOW_MS },
     });
   }
 
@@ -116,4 +123,5 @@ module.exports = {
   checkForAnomalies,
   BASELINES,
   MIN_SAMPLE_SIZE,
+  ERROR_WINDOW_MS,
 };

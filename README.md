@@ -9,7 +9,7 @@ A public parcel routing system that processes parcels and routes them to the app
 - **Backend:** Node.js + Express (JavaScript)
 - **Queue + temporary state:** BullMQ + Redis (`ioredis`)
 - **Frontend:** React + Vite (JavaScript)
-- **Testing:** Jest (backend suite, Redis state via `ioredis-mock`)
+- **Testing:** Jest (backend, 23 suites / 301 tests, Redis state via `ioredis-mock`) + Vitest (frontend, 8 files / 42 tests, jsdom)
 
 ## Project Structure
 
@@ -53,7 +53,7 @@ assignment/
 cd backend
 npm install
 npm run dev        # Start development server (port 3001)
-npm test           # Run 205 automated tests
+npm test           # Run 301 automated backend tests (23 suites)
 ```
 
 ### Frontend
@@ -62,7 +62,7 @@ npm test           # Run 205 automated tests
 cd frontend
 npm install
 npm run dev        # Start development server (port 5173)
-npm test           # Run frontend unit tests (vitest: pagination + API client)
+npm test           # Run 42 frontend unit tests (vitest: pagination, API client, components)
 ```
 
 ## API Contracts

@@ -20,6 +20,7 @@
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const cors = require('cors');
+const { positiveIntOrDefault } = require('../../config');
 
 /**
  * Creates the CORS middleware with environment-aware configuration.
@@ -55,18 +56,6 @@ function createCorsMiddleware() {
 }
 
 /**
- * Parses a positive integer environment value, falling back safely.
- *
- * Threat: misconfiguration (empty, negative, NaN, fractional values) must
- * never disable or corrupt a security control — invalid input keeps the
- * secure default instead of throwing or producing a 0/unlimited limit.
- */
-function positiveIntOrDefault(value, fallback) {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-/**
  * Creates rate limiting middleware.
  *
  * Threat: DDoS / brute-force / resource exhaustion.
@@ -75,21 +64,71 @@ function positiveIntOrDefault(value, fallback) {
  *   the server or consuming all batch processing capacity.
  *
  * We use different limits for different endpoints:
- * - General API: 100 requests per 15 minutes
+ * - General API: configurable requests per configurable window
  * - Batch creation: configurable requests per configurable window
  *   (each batch is expensive). The batch limiter applies ONLY to
- *   POST /api/batches — status/results polling uses the general limiter
- *   so legitimate polling is never throttled by creation limits.
+ *   POST /api/batches — status/results polling has its own dedicated
+ *   limiter (createPollingRateLimiter) so legitimate polling is never
+ *   throttled by creation limits.
  */
 function createGeneralRateLimiter() {
   return rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100,                  // 100 requests per window
+    windowMs: positiveIntOrDefault(
+      process.env.RATE_LIMIT_WINDOW_MS,
+      15 * 60 * 1000, // 15 minutes
+    ),
+    max: positiveIntOrDefault(
+      process.env.RATE_LIMIT_MAX,
+      100, // 100 requests per window
+    ),
     standardHeaders: true,     // Return rate limit info in `RateLimit-*` headers
     legacyHeaders: false,      // Disable `X-RateLimit-*` headers
+    // Batch status/results polling has its own dedicated limiter (see
+    // createPollingRateLimiter); skip those paths here so a long-running
+    // batch polling ~1/sec is never throttled by the interactive budget.
+    skip: isBatchPollRequest,
     message: {
       status: 'error',
       message: 'Too many requests. Please try again later.',
+    },
+  });
+}
+
+/**
+ * Matches batch polling reads: GET /api/batches/:batchId and
+ * GET /api/batches/:batchId/results. Uses req.originalUrl (never stripped
+ * by mounts) so the match is stable regardless of router mounting.
+ */
+function isBatchPollRequest(req) {
+  if (!req || req.method !== 'GET') return false;
+  const url = (req.originalUrl || req.url || '').split('?')[0];
+  return /^\/api\/batches\/[^/]+\/results\/?$/.test(url)
+    || /^\/api\/batches\/[^/]+\/?$/.test(url);
+}
+
+/**
+ * Dedicated limiter for batch status/results polling.
+ *
+ * Threat: polling abuse (a client hammering status in a tight loop).
+ * Protection: generous dedicated budget, separate from interactive traffic.
+ * Why it matters: legitimate polling (~1/sec for minutes) must survive,
+ * while a tight abuse loop still gets throttled.
+ */
+function createPollingRateLimiter() {
+  return rateLimit({
+    windowMs: positiveIntOrDefault(
+      process.env.RATE_LIMIT_WINDOW_MS,
+      15 * 60 * 1000, // 15 minutes
+    ),
+    max: positiveIntOrDefault(
+      process.env.POLLING_RATE_LIMIT_MAX,
+      300, // 300 polling reads per window (2+ minutes at 1/sec + pages)
+    ),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      status: 'error',
+      message: 'Too many status requests. Please slow down polling.',
     },
   });
 }
@@ -214,6 +253,8 @@ module.exports = {
   createCorsMiddleware,
   createGeneralRateLimiter,
   createBatchRateLimiter,
+  createPollingRateLimiter,
+  isBatchPollRequest,
   createHelmetMiddleware,
   sanitizeInput,
   requireJsonContentType,

@@ -24,14 +24,20 @@ const { positiveIntOrDefault } = require('../../src/api/middleware/security');
 
 const WINDOW_VAR = 'RATE_LIMIT_WINDOW_MS';
 const MAX_VAR = 'BATCH_RATE_LIMIT_MAX';
+const GENERAL_MAX_VAR = 'RATE_LIMIT_MAX';
+const POLLING_MAX_VAR = 'POLLING_RATE_LIMIT_MAX';
 
 let savedWindow;
 let savedMax;
+let savedGeneralMax;
+let savedPollingMax;
 
 function loadApp(env = {}) {
   jest.resetModules();
   delete process.env[WINDOW_VAR];
   delete process.env[MAX_VAR];
+  delete process.env[GENERAL_MAX_VAR];
+  delete process.env[POLLING_MAX_VAR];
   Object.assign(process.env, env);
   const freshRedis = require('../../src/infrastructure/redis');
   freshRedis.setRedisImplementation(RedisMock);
@@ -45,6 +51,8 @@ describe('Batch rate-limit configuration', () => {
   beforeAll(() => {
     savedWindow = process.env[WINDOW_VAR];
     savedMax = process.env[MAX_VAR];
+    savedGeneralMax = process.env[GENERAL_MAX_VAR];
+    savedPollingMax = process.env[POLLING_MAX_VAR];
   });
 
   afterEach(() => {
@@ -52,6 +60,10 @@ describe('Batch rate-limit configuration', () => {
     else process.env[WINDOW_VAR] = savedWindow;
     if (savedMax === undefined) delete process.env[MAX_VAR];
     else process.env[MAX_VAR] = savedMax;
+    if (savedGeneralMax === undefined) delete process.env[GENERAL_MAX_VAR];
+    else process.env[GENERAL_MAX_VAR] = savedGeneralMax;
+    if (savedPollingMax === undefined) delete process.env[POLLING_MAX_VAR];
+    else process.env[POLLING_MAX_VAR] = savedPollingMax;
   });
 
   describe('positiveIntOrDefault', () => {
@@ -138,6 +150,35 @@ describe('Batch rate-limit configuration', () => {
       // Only one creation used so far: one more POST succeeds, then 429.
       expect((await request(app).post('/api/batches').send(body)).status).toBe(202);
       expect((await request(app).post('/api/batches').send(body)).status).toBe(429);
+    });
+
+    it('GET polling bypasses a tiny general limit (dedicated polling budget)', async () => {
+      // General budget of 5 would 429 the 6th request if polling counted
+      // toward it; all 10 polls must succeed on the polling limiter instead.
+      const app = loadApp({ [GENERAL_MAX_VAR]: '5', [POLLING_MAX_VAR]: '50' });
+      const body = { parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] };
+      const created = await request(app).post('/api/batches').send(body);
+      expect(created.status).toBe(202);
+      const batchId = created.body.data.batchId;
+
+      for (let i = 0; i < 10; i++) {
+        const res = await request(app).get(`/api/batches/${batchId}`);
+        expect(res.status).toBe(200);
+      }
+    });
+
+    it('tight polling loops still hit the dedicated polling limiter', async () => {
+      const app = loadApp({ [POLLING_MAX_VAR]: '2' });
+      const body = { parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] };
+      const created = await request(app).post('/api/batches').send(body);
+      expect(created.status).toBe(202);
+      const batchId = created.body.data.batchId;
+
+      expect((await request(app).get(`/api/batches/${batchId}`)).status).toBe(200);
+      expect((await request(app).get(`/api/batches/${batchId}`)).status).toBe(200);
+      const limited = await request(app).get(`/api/batches/${batchId}`);
+      expect(limited.status).toBe(429);
+      expect(limited.body.message).toBe('Too many status requests. Please slow down polling.');
     });
   });
 });

@@ -617,7 +617,10 @@ occurring between computation and checkpoint.
 - The worker (`worker.js`) claims/releases/checkpoints via `batchStore.js` with per-claim ownership tokens; chunk size defaults to `BATCH_CHUNK_SIZE` (500), lease `CHUNK_LEASE_MS` (5 min, matching the BullMQ lock duration — far above realistic per-chunk processing time, so no lease renewal is needed)
 - Each parcel is validated and routed independently (mixed-validity handling → `COMPLETED_WITH_ERRORS`, never a silent drop); unexpected system errors propagate to BullMQ retry and are recorded in the error metric, never stored as parcel rows
 - `validateBatchInput()` rejects batches over 10,000 parcels as a safety limit; results pages are capped (`RESULTS_MAX_LIMIT`) and the UI paginates (200/page, full result set reachable)
-- Batch results follow ONE canonical contract (`parcelId/index/status/department/requiresApproval/approvals/matchedRules/reasons/errors/inputSummary`) rendered directly by the UI
+- Batch results follow ONE canonical contract (`parcelId/index/status/department/requiresApproval/approvals/matchedRules/reasons/errors/inputSummary`) stored in Redis and served by the API; the UI intentionally renders a subset (department + first reason + generic approvals, never raw rule IDs)
+- Result pagination is a deliberate bounded tradeoff: pages are served from the in-Redis results hash (HGETALL, capped at `RESULTS_MAX_LIMIT`, default 1000; batches cap at 10,000 parcels), so one page costs one bounded read rather than cursor infrastructure — documented here instead of over-engineered
+- Orphaned `QUEUED` batches (crash between state creation and enqueue) are recovered at startup: batches older than the grace period with no queue job are re-enqueued (safe: deterministic job IDs + idempotent checkpoints/HSETNX); `Idempotency-Key` request headers deduplicate client retries (same key + same body → original batch; different body → 409)
+- Anomaly detection uses a 15-minute rolling error window (not the cumulative counter) and measures department mix over successfully routed parcels only; in-memory metrics reset on process restart by design
 
 ### Interview Talking Points
 - "The queue owns the work and Redis owns temporary state — both expire, because the flow ends at result display, not permanent history."
@@ -636,10 +639,11 @@ The original assessment requires only one approval rule (`value > €1000 → In
 that new rules can be added without touching the engine — it is NOT presented as an
 original requirement.
 
-### Workflow Executed
+### Workflow Executed (historical snapshot — counts below are from that
+change, not the current suite; see README for current numbers)
 
 ```text
-master (Phase 4 complete, 95 tests passing)
+master (Phase 4 complete, 95 tests passing at the time)
   ↓
 git checkout -b feature/manual-review-rule
   ↓

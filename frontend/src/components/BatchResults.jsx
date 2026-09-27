@@ -127,6 +127,18 @@ export default function BatchResults({ data }) {
         </div>
       )}
 
+      {batch && batch.status === 'FAILED' && (
+        <div className="batch-failed-banner" role="alert">
+          <strong>Batch failed</strong>
+          {batch.error ? <p>{batch.error}</p> : null}
+          <p className="na-text">
+            {resultCount > 0
+              ? `${resultCount.toLocaleString()} partial result${resultCount === 1 ? '' : 's'} available below.`
+              : 'No results were stored for this batch.'}
+          </p>
+        </div>
+      )}
+
       {/* Summary Cards */}
       <div className="batch-summary">
         <div className="summary-card summary-total">

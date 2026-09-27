@@ -13,6 +13,7 @@
 const express = require('express');
 const { randomUUID } = require('crypto');
 const { validateParcelInput, getValidCountryCodes } = require('../../domain/validation');
+const { hasParcelId, validateParcelId } = require('../../domain/batchProcessor');
 const { routeParcel } = require('../../domain/routingEngine');
 const { ValidationFailedError } = require('../../errors/AppError');
 const { logger } = require('../../observability/logger');
@@ -31,7 +32,7 @@ function handleSingleParcel(req, res, next) {
   try {
     const input = req.body;
 
-    // Step 1: Validate
+    // Step 1: Validate (parcel fields + parcelId type, shared contract)
     const validation = validateParcelInput(input);
     if (!validation.success) {
       recordFailure();
@@ -42,6 +43,11 @@ function handleSingleParcel(req, res, next) {
       });
       throw new ValidationFailedError(validation.errors);
     }
+    const parcelIdTypeError = validateParcelId(input.parcelId);
+    if (parcelIdTypeError) {
+      recordFailure();
+      throw new ValidationFailedError([{ field: 'parcelId', message: parcelIdTypeError }]);
+    }
 
     // Step 2: Route (shared domain core)
     const result = routeParcel(validation.parcel);
@@ -50,7 +56,7 @@ function handleSingleParcel(req, res, next) {
     recordRouting(result.department, result.approvals);
     recordProcessingTime(Date.now() - start);
 
-    const parcelId = input.parcelId || `P-${randomUUID().split('-')[0]}`;
+    const parcelId = hasParcelId(input.parcelId) ? input.parcelId : `P-${randomUUID().split('-')[0]}`;
 
     logger.info('Parcel routed', {
       requestId: req.id,
@@ -110,6 +116,11 @@ router.post('/validate', (req, res, next) => {
 
     if (!result.success) {
       throw new ValidationFailedError(result.errors);
+    }
+
+    const parcelIdTypeError = validateParcelId(input.parcelId);
+    if (parcelIdTypeError) {
+      throw new ValidationFailedError([{ field: 'parcelId', message: parcelIdTypeError }]);
     }
 
     res.status(200).json({

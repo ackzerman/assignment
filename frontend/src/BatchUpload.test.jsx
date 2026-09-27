@@ -78,4 +78,23 @@ describe('BatchUpload duplicate submission guard', () => {
     fireEvent.click(processAgain);
     await waitFor(() => expect(createBatch).toHaveBeenCalledTimes(2));
   });
+
+  it('sends a per-submission idempotency key with batch creation', async () => {
+    vi.mocked(createBatch).mockResolvedValue({ batchId: 'BATCH-1', status: 'QUEUED' });
+    vi.mocked(pollBatchStatus).mockResolvedValue({ status: 'COMPLETED' });
+    vi.mocked(fetchBatchResults).mockResolvedValue({ results: [], resultCount: 0 });
+
+    const { container } = render(
+      <BatchUpload onBatchResult={vi.fn()} onError={vi.fn()} onClear={vi.fn()} />,
+    );
+    uploadParcels(container);
+    const processButton = await screen.findByRole('button', { name: /Process 1 Parcel/ });
+    fireEvent.click(processButton);
+    await waitFor(() => expect(createBatch).toHaveBeenCalledTimes(1));
+
+    // Key present, non-empty, and passed alongside the parcels payload.
+    const [, options] = vi.mocked(createBatch).mock.calls[0];
+    expect(typeof options.idempotencyKey).toBe('string');
+    expect(options.idempotencyKey.length).toBeGreaterThan(0);
+  });
 });

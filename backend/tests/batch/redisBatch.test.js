@@ -372,4 +372,18 @@ describe('Redis batch processing', () => {
     workerJobFinished(); // extra finish must not go negative
     expect(getMetrics().workerActiveJobs).toBe(0);
   });
+
+  it('preserves an explicit falsy parcelId of 0 through worker processing', async () => {
+    const id = await createBatch('zeroid', [
+      { weight: 2, value: 100, destinationCountry: 'DE', parcelId: 0 },
+      { weight: 2, value: 100, destinationCountry: 'DE' },
+    ]);
+    const job = mockJob('job-zeroid');
+    job.data = { batchId: id };
+    const summary = await processBatchJob(job);
+    expect(summary.status).toBe('COMPLETED');
+
+    const rows = await store.getBatchResults(id, {});
+    expect(rows.map((r) => r.parcelId).sort()).toEqual([0, 'P2']);
+  });
 });

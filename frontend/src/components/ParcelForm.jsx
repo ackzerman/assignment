@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
-import { routeParcel, fetchCountries } from '../api';
+import { useState, useEffect, useRef } from 'react';
+import { routeParcel, fetchCountries, isAbortError } from '../api';
+import { countryName } from '../countries';
 
 /**
  * ParcelForm — Single parcel routing form for operators.
@@ -11,22 +12,6 @@ import { routeParcel, fetchCountries } from '../api';
  * - The form remains usable for non-technical operators
  */
 
-// Map of country codes to display names for the dropdown
-const COUNTRY_NAMES = {
-  AT: 'Austria', BE: 'Belgium', BG: 'Bulgaria', HR: 'Croatia',
-  CY: 'Cyprus', CZ: 'Czech Republic', DK: 'Denmark', EE: 'Estonia',
-  FI: 'Finland', FR: 'France', DE: 'Germany', GR: 'Greece',
-  HU: 'Hungary', IE: 'Ireland', IT: 'Italy', LV: 'Latvia',
-  LT: 'Lithuania', LU: 'Luxembourg', MT: 'Malta', NL: 'Netherlands',
-  PL: 'Poland', PT: 'Portugal', RO: 'Romania', SK: 'Slovakia',
-  SI: 'Slovenia', ES: 'Spain', SE: 'Sweden', GB: 'United Kingdom',
-  US: 'United States', CA: 'Canada', AU: 'Australia', JP: 'Japan',
-  CN: 'China', IN: 'India', BR: 'Brazil', MX: 'Mexico', KR: 'South Korea',
-  CH: 'Switzerland', NO: 'Norway', NZ: 'New Zealand', SG: 'Singapore',
-  ZA: 'South Africa', AE: 'UAE', SA: 'Saudi Arabia', TR: 'Turkey',
-  TH: 'Thailand', MY: 'Malaysia',
-};
-
 export default function ParcelForm({ onResult, onError, onClear }) {
   const [countries, setCountries] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -37,6 +22,18 @@ export default function ParcelForm({ onResult, onError, onClear }) {
   const [value, setValue] = useState('');
   const [destinationCountry, setDestinationCountry] = useState('');
   const [attributes, setAttributes] = useState([]);
+  const [attrError, setAttrError] = useState(null);
+  // In-flight request tracking: each submit gets a generation id + its own
+  // AbortController. Stale completions (unmount, tab switch, replaced submit)
+  // are ignored silently — never surfaced as application errors.
+  const requestRef = useRef({ id: 0, controller: null });
+
+  // Abort any in-flight submit on unmount so its late response cannot touch
+  // dead state or a replaced UI.
+  useEffect(() => () => {
+    requestRef.current.controller?.abort();
+    requestRef.current.id++;
+  }, []);
 
   // Load country codes from backend on mount
   useEffect(() => {
@@ -47,16 +44,19 @@ export default function ParcelForm({ onResult, onError, onClear }) {
 
   // Add a new key-value attribute row
   function addAttribute() {
+    setAttrError(null);
     setAttributes([...attributes, { key: '', value: '' }]);
   }
 
   // Remove an attribute row
   function removeAttribute(index) {
+    setAttrError(null);
     setAttributes(attributes.filter((_, i) => i !== index));
   }
 
   // Update an attribute row
   function updateAttribute(index, field, val) {
+    setAttrError(null);
     const updated = [...attributes];
     updated[index] = { ...updated[index], [field]: val };
     setAttributes(updated);
@@ -82,7 +82,35 @@ export default function ParcelForm({ onResult, onError, onClear }) {
   async function handleSubmit(e) {
     e.preventDefault();
     setFieldErrors({});
+    setAttrError(null);
+
+    // Client-side weight guard: the backend requires weight > 0, so reject
+    // non-positive input immediately with the same clear message instead of
+    // a wasted round trip. (Backend remains authoritative.)
+    if (weight !== '' && !(Number(weight) > 0)) {
+      setFieldErrors({ weight: 'Weight must be greater than 0.' });
+      return;
+    }
+
+    // Duplicate attribute keys would otherwise silently overwrite each
+    // other (last-wins) with no indication to the operator. Reject up front.
+    const seenKeys = new Set();
+    for (const attr of attributes) {
+      const key = attr.key.trim();
+      if (!key) continue;
+      if (seenKeys.has(key)) {
+        setAttrError(`Duplicate attribute key "${key}". Keys must be unique.`);
+        return;
+      }
+      seenKeys.add(key);
+    }
+
     onClear();
+
+    const requestId = ++requestRef.current.id;
+    requestRef.current.controller?.abort();
+    const controller = new AbortController();
+    requestRef.current.controller = controller;
     setLoading(true);
 
     const parcelData = {
@@ -93,9 +121,11 @@ export default function ParcelForm({ onResult, onError, onClear }) {
     };
 
     try {
-      const result = await routeParcel(parcelData);
+      const result = await routeParcel(parcelData, { signal: controller.signal });
+      if (requestRef.current.id !== requestId) return; // Stale: UI moved on.
       onResult(result.data);
     } catch (err) {
+      if (isAbortError(err) || requestRef.current.id !== requestId) return;
       if (err.validationErrors) {
         // Map validation errors to field names for inline display
         const mapped = {};
@@ -106,7 +136,7 @@ export default function ParcelForm({ onResult, onError, onClear }) {
       }
       onError(err);
     } finally {
-      setLoading(false);
+      if (requestRef.current.id === requestId) setLoading(false);
     }
   }
 
@@ -116,6 +146,7 @@ export default function ParcelForm({ onResult, onError, onClear }) {
     setDestinationCountry('');
     setAttributes([]);
     setFieldErrors({});
+    setAttrError(null);
     onClear();
   }
 
@@ -123,14 +154,14 @@ export default function ParcelForm({ onResult, onError, onClear }) {
     <form className="parcel-form" onSubmit={handleSubmit}>
       <h2>Route a Parcel</h2>
 
-      {/* Weight */}
+      {/* Weight (backend requires weight > 0; no min attribute so the
+          input never suggests zero is valid — the submit guard explains) */}
       <div className={`form-group ${fieldErrors.weight ? 'has-error' : ''}`}>
         <label htmlFor="parcel-weight">Weight (kg)</label>
         <input
           id="parcel-weight"
           type="number"
           step="any"
-          min="0"
           placeholder="e.g. 2.5"
           value={weight}
           onChange={(e) => setWeight(e.target.value)}
@@ -168,7 +199,7 @@ export default function ParcelForm({ onResult, onError, onClear }) {
           <option value="">— Select a country —</option>
           {countries.map((code) => (
             <option key={code} value={code}>
-              {COUNTRY_NAMES[code] || code} ({code})
+              {countryName(code)} ({code})
             </option>
           ))}
         </select>
@@ -212,6 +243,9 @@ export default function ParcelForm({ onResult, onError, onClear }) {
           >
             + Add Attribute
           </button>
+          {attrError && (
+            <span className="field-error">{attrError}</span>
+          )}
         </div>
       </div>
 

@@ -29,15 +29,17 @@
 const { Worker } = require('bullmq');
 const { randomUUID } = require('crypto');
 const { validateParcelInput } = require('../domain/validation');
+const { hasParcelId } = require('../domain/batchProcessor');
 const { routeParcel } = require('../domain/routingEngine');
 // Namespace import so tests can inject failures via jest.spyOn(store, ...).
 const store = require('./batchStore');
 const { logger } = require('../observability/logger');
 const { recordRouting, recordFailure, recordBatch, recordError, recordJobCompleted, recordJobFailed, recordJobRetry, workerJobStarted, workerJobFinished } = require('../observability/metrics');
 const { QUEUE_NAME, DEFAULT_REDIS_CONFIG } = require('./queue');
+const { positiveIntOrDefault } = require('../config');
 
 const DEFAULT_CHUNK_SIZE = parseInt(process.env.BATCH_CHUNK_SIZE || '500', 10) || 500;
-const DEFAULT_CHUNK_LEASE_MS = parseInt(process.env.CHUNK_LEASE_MS || '300000', 10) || 300000;
+const DEFAULT_CHUNK_LEASE_MS = positiveIntOrDefault(process.env.CHUNK_LEASE_MS, 300000);
 
 let worker = null;
 
@@ -232,7 +234,7 @@ async function processBatchJob(job, options = {}) {
       // propagate to the catch — never converted into parcel rows.
       for (let index = chunk.startIndex; index < chunk.endIndex; index++) {
         const parcelData = parcels[index];
-        const parcelId = parcelData?.parcelId || `P${index + 1}`;
+        const parcelId = hasParcelId(parcelData?.parcelId) ? parcelData.parcelId : `P${index + 1}`;
 
         const result = processOneParcel(batchId, parcelId, parcelData, index);
         chunkResults.push(result);

@@ -16,13 +16,33 @@ const { randomUUID } = require('crypto');
 const { logger } = require('../../observability/logger');
 const { recordHttpRequest } = require('../../observability/metrics');
 
+// Request IDs are echoed into response headers and structured logs, so an
+// attacker-controlled value must be constrained: cap length and charset,
+// otherwise an arbitrary huge or dangerous value propagates everywhere.
+const MAX_REQUEST_ID_LENGTH = 128;
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_\-.:]+$/;
+
+/**
+ * Returns true for safe client-provided request IDs.
+ */
+function isValidRequestId(value) {
+  return (
+    typeof value === 'string'
+    && value.length > 0
+    && value.length <= MAX_REQUEST_ID_LENGTH
+    && REQUEST_ID_PATTERN.test(value)
+  );
+}
+
 /**
  * Assigns a unique request ID to every request.
- * If the client sends an X-Request-ID header, we reuse it (for distributed tracing).
+ * A client-provided X-Request-ID is reused only when safe (for distributed
+ * tracing); otherwise a server-side UUID is generated.
  * The ID is attached to req.id and returned in the X-Request-ID response header.
  */
 function requestId(req, res, next) {
-  req.id = req.headers['x-request-id'] || randomUUID();
+  const incoming = req.headers['x-request-id'];
+  req.id = isValidRequestId(incoming) ? incoming : randomUUID();
   res.setHeader('X-Request-ID', req.id);
   next();
 }
@@ -71,4 +91,4 @@ function requestLogger(req, res, next) {
   next();
 }
 
-module.exports = { requestId, requestLogger };
+module.exports = { requestId, requestLogger, isValidRequestId, MAX_REQUEST_ID_LENGTH };

@@ -20,6 +20,7 @@ require('dotenv').config();
 const app = require('./app');
 const { pingRedis, closeRedis, startEmbeddedRedisIfEnabled } = require('./infrastructure/redis');
 const { initQueue, closeQueue } = require('./infrastructure/queue');
+const { recoverOrphanedBatches } = require('./infrastructure/recovery');
 const { createWorker, closeWorker } = require('./infrastructure/worker');
 const { logger } = require('./observability/logger');
 
@@ -49,6 +50,14 @@ async function start() {
     // 2. Initialize queue (connects to Redis)
     initQueue(bullMqConnection);
     logger.info('Queue ready');
+
+    // 2b. Recover batches orphaned by a crash between state creation and
+    // job enqueue (QUEUED with no job). Never crashes boot: failures log.
+    try {
+      await recoverOrphanedBatches();
+    } catch (err) {
+      logger.warn('Orphan batch recovery failed; continuing startup', { error: err.message });
+    }
 
     // 3. Start worker (consumes batch jobs from queue)
     createWorker(bullMqConnection ? { connection: bullMqConnection } : undefined);

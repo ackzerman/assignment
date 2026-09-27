@@ -10,7 +10,7 @@
  * the pure validation helper only; runtime behavior is tested in tests/batch/.
  */
 
-const { validateBatchInput, assignParcelIds, findDuplicateParcelId, DEFAULT_MAX_BATCH_SIZE } = require('../../src/domain/batchProcessor');
+const { validateBatchInput, assignParcelIds, findDuplicateParcelId, hasParcelId, validateParcelId, DEFAULT_MAX_BATCH_SIZE } = require('../../src/domain/batchProcessor');
 
 // --- Helper: a valid parcel data object ---
 function validParcel(overrides = {}) {
@@ -144,5 +144,56 @@ describe('assignParcelIds / findDuplicateParcelId (final ID invariant)', () => {
   test('accepts fully unique final IDs', () => {
     const assigned = assignParcelIds([validParcel(), validParcel({ parcelId: 'X9' })]);
     expect(findDuplicateParcelId(assigned)).toBeNull();
+  });
+});
+
+// ============================================================
+//  parcelId contract — presence (not truthiness) + type validation
+// ============================================================
+
+describe('parcelId contract', () => {
+  test.each([
+    [undefined, false],
+    [null, false],
+    ['', false],
+    ['P1', true],
+    ['0', true],
+    [0, true],
+    [42, true],
+    [false, true],
+  ])('hasParcelId(%p) → %p', (value, expected) => {
+    expect(hasParcelId(value)).toBe(expected);
+  });
+
+  test.each([
+    [undefined, null],
+    [null, null],
+    ['', null],
+    ['P1', null],
+    [0, null],
+    [42, null],
+    [{}, 'parcelId must be a string or a finite number.'],
+    [['P1'], 'parcelId must be a string or a finite number.'],
+    [true, 'parcelId must be a string or a finite number.'],
+    [NaN, 'parcelId must be a string or a finite number.'],
+    [Infinity, 'parcelId must be a string or a finite number.'],
+  ])('validateParcelId(%p) → %p', (value, expected) => {
+    expect(validateParcelId(value)).toBe(expected);
+  });
+
+  test('validateBatchInput rejects non-string/non-number parcelIds', () => {
+    expect(validateBatchInput({ parcels: [validParcel({ parcelId: {} })] }).valid).toBe(false);
+    expect(validateBatchInput({ parcels: [validParcel({ parcelId: [1] })] }).valid).toBe(false);
+  });
+
+  test('validateBatchInput accepts 0 as an explicit parcelId', () => {
+    const result = validateBatchInput({ parcels: [validParcel({ parcelId: 0 })] });
+    expect(result.valid).toBe(true);
+  });
+
+  test('assignParcelIds preserves an explicit 0 instead of regenerating', () => {
+    const assigned = assignParcelIds([validParcel({ parcelId: 0 }), validParcel()]);
+    expect(assigned[0].parcelId).toBe(0);
+    expect(assigned[1].parcelId).toBe('P2');
   });
 });

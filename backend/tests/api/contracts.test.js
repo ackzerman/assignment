@@ -47,6 +47,24 @@ describe('API contracts', () => {
     expect(res.body.data.reasons.length).toBeGreaterThan(0);
   });
 
+  it('POST /api/parcels preserves an explicit falsy parcelId of 0', async () => {
+    const res = await request(app)
+      .post('/api/parcels')
+      .send({ weight: 5, value: 100, destinationCountry: 'DE', parcelId: 0 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.parcelId).toBe(0);
+  });
+
+  it('POST /api/parcels rejects a non-string/non-number parcelId', async () => {
+    const res = await request(app)
+      .post('/api/parcels')
+      .send({ weight: 5, value: 100, destinationCountry: 'DE', parcelId: { id: 1 } });
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body.errors)).toContain('parcelId');
+  });
+
   it('POST /api/batches returns 202 with a full-UUID batchId and QUEUED status', async () => {
     const res = await request(app)
       .post('/api/batches')
