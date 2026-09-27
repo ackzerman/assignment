@@ -88,36 +88,7 @@ function createWorker(options = {}) {
     });
   });
 
-  worker.on('failed', (job, err) => {
-    logger.error('Batch job failed', {
-      jobId: job?.id,
-      batchId: job?.data?.batchId,
-      workerId: worker.id,
-      error: err.message,
-      attemptsMade: job?.attemptsMade,
-      maxAttempts: job?.opts?.attempts,
-    });
-
-    // Retries: transient attempts are retried by BullMQ; count them.
-    const maxAttempts = job?.opts?.attempts || 3;
-    if (job && (job.attemptsMade || 0) < maxAttempts) {
-      recordJobRetry();
-    }
-
-    // If all retries exhausted, mark batch as FAILED in Redis state.
-    if (job && job.attemptsMade >= (job.opts?.attempts || 3)) {
-      recordJobFailed();
-      store.markBatchFailed(
-        job.data.batchId,
-        `Processing failed after ${job.attemptsMade} attempts: ${err.message}`,
-      ).catch((storeErr) => {
-        logger.error('Failed to mark batch FAILED after job failure', {
-          batchId: job.data.batchId,
-          error: storeErr.message,
-        });
-      });
-    }
-  });
+  worker.on('failed', (job, err) => handleJobFailed(job, err));
 
   worker.on('error', (err) => {
     logger.error('Worker error', {
@@ -133,6 +104,47 @@ function createWorker(options = {}) {
   });
 
   return worker;
+}
+
+/**
+ * Handles a BullMQ job failure (extracted for testability).
+ *
+ * - Non-terminal failures: counted as retries (BullMQ will retry).
+ * - Exhausted retries: the batch is marked FAILED with a SAFE, generic
+ *   public message. The raw internal error is logged here for diagnostics
+ *   but NEVER written to batch state, so GET /api/batches/:batchId can only
+ *   ever expose the safe text. The throw itself still propagates through
+ *   BullMQ, preserving retry/backoff behavior.
+ */
+function handleJobFailed(job, err) {
+  logger.error('Batch job failed', {
+    jobId: job?.id,
+    batchId: job?.data?.batchId,
+    workerId: worker?.id,
+    error: err.message,
+    attemptsMade: job?.attemptsMade,
+    maxAttempts: job?.opts?.attempts,
+  });
+
+  // Retries: transient attempts are retried by BullMQ; count them.
+  const maxAttempts = job?.opts?.attempts || 3;
+  if (job && (job.attemptsMade || 0) < maxAttempts) {
+    recordJobRetry();
+  }
+
+  // If all retries exhausted, mark batch as FAILED in Redis state.
+  if (job && job.attemptsMade >= (job.opts?.attempts || 3)) {
+    recordJobFailed();
+    store.markBatchFailed(
+      job.data.batchId,
+      `Batch processing failed after ${job.attemptsMade} attempts.`,
+    ).catch((storeErr) => {
+      logger.error('Failed to mark batch FAILED after job failure', {
+        batchId: job.data.batchId,
+        error: storeErr.message,
+      });
+    });
+  }
 }
 
 /**
@@ -435,6 +447,7 @@ module.exports = {
   createWorker,
   closeWorker,
   getWorker,
+  handleJobFailed, // Exported for failure-path testing (no live BullMQ needed)
   processBatchJob, // Exported for integration testing (mock Redis + mock job)
   processOneParcel, // Exported for unit testing
   DEFAULT_CHUNK_SIZE,
