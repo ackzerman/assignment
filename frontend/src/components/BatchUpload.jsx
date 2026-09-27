@@ -35,6 +35,11 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
   const [progress, setProgress] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef(null);
+  // Synchronous submit guard: React state updates are async, so two rapid
+  // handleProcess() invocations could both pass a `processing` check before
+  // either re-renders. A ref flips synchronously, guaranteeing a single
+  // in-flight POST /api/batches per user action.
+  const submittingRef = useRef(false);
 
   /**
    * Reads and parses a JSON file.
@@ -140,8 +145,9 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
    * never blow up the DOM or need silent truncation).
    */
   async function handleProcess() {
-    if (!parcels || parcels.length === 0) return;
+    if (!parcels || parcels.length === 0 || submittingRef.current) return;
 
+    submittingRef.current = true;
     setProcessing(true);
     setProgress({ status: 'QUEUED', processed: 0, total: parcels.length, progress: 0 });
     onClear();
@@ -161,6 +167,7 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
     } catch (err) {
       onError(err);
     } finally {
+      submittingRef.current = false;
       setProcessing(false);
     }
   }
@@ -172,6 +179,7 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
     setFile(null);
     setParcels(null);
     setParseError(null);
+    submittingRef.current = false;
     setProcessing(false);
     setProgress(null);
     if (fileInputRef.current) {

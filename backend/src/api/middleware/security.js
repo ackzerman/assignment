@@ -55,6 +55,18 @@ function createCorsMiddleware() {
 }
 
 /**
+ * Parses a positive integer environment value, falling back safely.
+ *
+ * Threat: misconfiguration (empty, negative, NaN, fractional values) must
+ * never disable or corrupt a security control — invalid input keeps the
+ * secure default instead of throwing or producing a 0/unlimited limit.
+ */
+function positiveIntOrDefault(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
  * Creates rate limiting middleware.
  *
  * Threat: DDoS / brute-force / resource exhaustion.
@@ -64,7 +76,10 @@ function createCorsMiddleware() {
  *
  * We use different limits for different endpoints:
  * - General API: 100 requests per 15 minutes
- * - Batch endpoint: 10 requests per 15 minutes (each batch is expensive)
+ * - Batch creation: configurable requests per configurable window
+ *   (each batch is expensive). The batch limiter applies ONLY to
+ *   POST /api/batches — status/results polling uses the general limiter
+ *   so legitimate polling is never throttled by creation limits.
  */
 function createGeneralRateLimiter() {
   return rateLimit({
@@ -81,8 +96,14 @@ function createGeneralRateLimiter() {
 
 function createBatchRateLimiter() {
   return rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 10,                   // 10 batch requests per window
+    windowMs: positiveIntOrDefault(
+      process.env.RATE_LIMIT_WINDOW_MS,
+      15 * 60 * 1000, // 15 minutes
+    ),
+    max: positiveIntOrDefault(
+      process.env.BATCH_RATE_LIMIT_MAX,
+      10, // 10 batch creation requests per window
+    ),
     standardHeaders: true,
     legacyHeaders: false,
     message: {
@@ -196,4 +217,5 @@ module.exports = {
   createHelmetMiddleware,
   sanitizeInput,
   requireJsonContentType,
+  positiveIntOrDefault,
 };
