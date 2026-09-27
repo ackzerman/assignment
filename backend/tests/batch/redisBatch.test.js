@@ -111,13 +111,66 @@ describe('Redis batch processing', () => {
     expect(await store.claimNextChunk(id, 'worker-B', 60000)).toBeNull();
   });
 
-  it('releaseChunk only releases the owning worker’s claim', async () => {
+  it('claims mint unique ownership tokens', async () => {
+    const id = await createBatch('tokens', parcels(4), 2);
+    const a = await store.claimChunk(id, 0, 'worker-A', 60000);
+    const b = await store.claimChunk(id, 1, 'worker-A', 60000);
+    expect(a.token).toBeDefined();
+    expect(b.token).toBeDefined();
+    expect(a.token).not.toBe(b.token);
+    expect(a.workerId).toBe('worker-A');
+  });
+
+  it('releaseChunk only releases the exact ownership token', async () => {
     const id = await createBatch('release', parcels(2), 2);
-    expect(await store.claimChunk(id, 0, 'worker-A', 60000)).not.toBeNull();
-    expect(await store.releaseChunk(id, 0, 'worker-B')).toBe(false);
+    const claimed = await store.claimChunk(id, 0, 'worker-A', 60000);
+    expect(claimed).not.toBeNull();
+    expect(await store.releaseChunk(id, 0, 'bogus-token')).toBe(false);
     expect((await store.getChunk(id, 0)).status).toBe('PROCESSING');
-    expect(await store.releaseChunk(id, 0, 'worker-A')).toBe(true);
+    expect(await store.releaseChunk(id, 0, claimed.token)).toBe(true);
     expect((await store.getChunk(id, 0)).status).toBe('PENDING');
+  });
+
+  it('a stale worker cannot checkpoint a chunk reclaimed by another worker', async () => {
+    const id = await createBatch('stale-commit', parcels(2), 2);
+    const stale = await store.claimChunk(id, 0, 'worker-A', 40);
+    expect(stale).not.toBeNull();
+    await new Promise((res) => setTimeout(res, 80));
+
+    // Worker B reclaims after A's lease expired.
+    const fresh = await store.claimNextChunk(id, 'worker-B', 60000);
+    expect(fresh).not.toBeNull();
+    expect(fresh.token).not.toBe(stale.token);
+
+    // A's late checkpoint is rejected: no DONE, no lock deletion, no results.
+    const data = parcels(2);
+    const staleResults = [processOneParcel(id, 'P1', data[0], 0)];
+    const rejected = await store.checkpointChunk(id, 0, stale.token, staleResults, 1, 0);
+    expect(rejected.committed).toBe(false);
+    expect((await store.getChunk(id, 0)).status).toBe('PROCESSING');
+    expect(await store.getBatchResultCount(id)).toBe(0);
+
+    // B's checkpoint with the live token commits.
+    const freshResults = [
+      processOneParcel(id, 'P1', data[0], 0),
+      processOneParcel(id, 'P2', data[1], 1),
+    ];
+    const committed = await store.checkpointChunk(id, 0, fresh.token, freshResults, 2, 0);
+    expect(committed).toEqual({ committed: true, inserted: 2, duplicates: 0 });
+    expect((await store.getChunk(id, 0)).status).toBe('DONE');
+  });
+
+  it('a stale worker cannot delete another worker’s lock via release', async () => {
+    const id = await createBatch('stale-release', parcels(2), 2);
+    const stale = await store.claimChunk(id, 0, 'worker-A', 40);
+    await new Promise((res) => setTimeout(res, 80));
+    const fresh = await store.claimNextChunk(id, 'worker-B', 60000);
+    expect(fresh).not.toBeNull();
+
+    // A's token no longer matches the live lock: release is refused.
+    expect(await store.releaseChunk(id, 0, stale.token)).toBe(false);
+    expect((await store.getChunk(id, 0)).status).toBe('PROCESSING');
+    expect((await store.getChunk(id, 0)).workerId).toBe('worker-B');
   });
 
   // --- Worker end-to-end (mock job, Redis state) ---
@@ -196,7 +249,7 @@ describe('Redis batch processing', () => {
 
     const job = mockJob('job-crash');
     job.data = { batchId: id };
-    await expect(processBatchJob(job, { leaseMs: 0 })).rejects.toThrow('simulated worker crash');
+    await expect(processBatchJob(job, { leaseMs: 60000 })).rejects.toThrow('simulated worker crash');
 
     expect((await store.getChunk(id, 0)).status).toBe('DONE');
     expect((await store.getChunk(id, 1)).status).not.toBe('DONE');
@@ -204,7 +257,7 @@ describe('Redis batch processing', () => {
 
     const retry = mockJob('job-retry2');
     retry.data = { batchId: id };
-    const summary = await processBatchJob(retry, { leaseMs: 0 });
+    const summary = await processBatchJob(retry, { leaseMs: 60000 });
     expect(summary.status).toBe('COMPLETED');
     expect(summary.successful).toBe(4);
 
@@ -222,7 +275,7 @@ describe('Redis batch processing', () => {
 
     const job = mockJob('job-gate');
     job.data = { batchId: id };
-    await expect(processBatchJob(job, { leaseMs: 0 })).rejects.toThrow('redis down');
+    await expect(processBatchJob(job, { leaseMs: 60000 })).rejects.toThrow('redis down');
 
     expect((await store.getChunk(id, 0)).status).not.toBe('DONE');
     expect(await store.getBatchResultCount(id)).toBe(0);
@@ -236,10 +289,11 @@ describe('Redis batch processing', () => {
       processOneParcel(id, 'P1', parcels(2)[0], 0),
       processOneParcel(id, 'P2', parcels(2)[1], 1),
     ];
-    const first = await store.checkpointChunk(id, chunk.chunkIndex, results, 2, 0);
-    expect(first).toEqual({ inserted: 2, duplicates: 0 });
-    const second = await store.checkpointChunk(id, chunk.chunkIndex, results, 2, 0);
-    expect(second).toEqual({ inserted: 0, duplicates: 2 });
+    const first = await store.checkpointChunk(id, chunk.chunkIndex, chunk.token, results, 2, 0);
+    expect(first).toEqual({ committed: true, inserted: 2, duplicates: 0 });
+    // Token is single-use: the lock is gone, so even the same holder is stale now.
+    const second = await store.checkpointChunk(id, chunk.chunkIndex, chunk.token, results, 2, 0);
+    expect(second.committed).toBe(false);
     expect(await store.getBatchResultCount(id)).toBe(2);
   });
 
@@ -254,7 +308,7 @@ describe('Redis batch processing', () => {
 
     const job = mockJob('job-unexpected');
     job.data = { batchId: id };
-    await expect(processBatchJob(job, { leaseMs: 0 })).rejects.toThrow('redis down');
+    await expect(processBatchJob(job, { leaseMs: 60000 })).rejects.toThrow('redis down');
 
     expect(getMetrics().errors).toBe(1);
     expect((await store.getChunk(id, 0)).status).toBe('PENDING');
@@ -265,7 +319,7 @@ describe('Redis batch processing', () => {
 
     const retry = mockJob('job-retry3');
     retry.data = { batchId: id };
-    const summary = await processBatchJob(retry, { leaseMs: 0 });
+    const summary = await processBatchJob(retry, { leaseMs: 60000 });
     expect(summary.status).toBe('COMPLETED');
     expect(await store.getBatchResultCount(id)).toBe(4);
   });
@@ -293,7 +347,7 @@ describe('Redis batch processing', () => {
     for (let index = chunk.startIndex; index < chunk.endIndex; index++) {
       results.push(processOneParcel(id, `P${index + 1}`, data[index], index));
     }
-    await store.checkpointChunk(id, chunk.chunkIndex, results, 2, 0);
+    await store.checkpointChunk(id, chunk.chunkIndex, chunk.token, results, 2, 0);
 
     const state = await store.getBatchState(id);
     expect(state.processed).toBe(2);

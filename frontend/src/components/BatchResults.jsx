@@ -19,6 +19,7 @@
 
 import { useState, useEffect } from 'react';
 import { fetchBatchResults } from '../api';
+import { PAGE_SIZE, pageCountFor, clampPage } from '../pagination';
 
 // Department display colors (same as RoutingResult)
 const DEPT_COLORS = {
@@ -26,8 +27,6 @@ const DEPT_COLORS = {
   Regular: '#10b981',
   Heavy: '#f59e0b',
 };
-
-const PAGE_SIZE = 200;
 
 export default function BatchResults({ data }) {
   const [filter, setFilter] = useState('all'); // 'all' | 'routed' | 'invalid'
@@ -43,7 +42,7 @@ export default function BatchResults({ data }) {
   const batch = data?.batch || null;
   const batchId = batch?.batchId || null;
   const resultCount = typeof data?.resultCount === 'number' ? data.resultCount : 0;
-  const pageCount = Math.max(1, Math.ceil(resultCount / PAGE_SIZE));
+  const pageCount = pageCountFor(resultCount, PAGE_SIZE);
 
   // Support the legacy embedded shape { summary, results } if ever passed.
   const legacyRows = Array.isArray(data?.results) ? data.results : null;
@@ -106,7 +105,7 @@ export default function BatchResults({ data }) {
   }
 
   function goToPage(next) {
-    const clamped = Math.min(Math.max(0, next), pageCount - 1);
+    const clamped = clampPage(next, pageCount);
     if (clamped === pageState.page) return;
     // Event handler (not an effect): safe to flag loading synchronously.
     setPageState((s) => ({ ...s, page: clamped, loading: true, error: null }));
@@ -255,7 +254,7 @@ export default function BatchResults({ data }) {
         .map((r) => (
           <div key={`detail-${r.index}`} className="batch-detail-panel">
             <div className="detail-panel-header">
-              Parcel #{r.index + 1} — {r.status === 'routed' ? 'Routing Details' : 'Validation Errors'}
+              Parcel #{r.index + 1}{r.parcelId ? ` (${r.parcelId})` : ''} — {r.status === 'routed' ? 'Routing Details' : 'Validation Errors'}
             </div>
             {r.status === 'routed' ? (
               <div className="detail-panel-body">
@@ -271,6 +270,16 @@ export default function BatchResults({ data }) {
                   <span className="detail-key">Country:</span>
                   <span>{(r.parcel || r.inputSummary)?.destinationCountry || '—'}</span>
                 </div>
+                {r.matchedRules && r.matchedRules.length > 0 && (
+                  <div className="detail-approvals">
+                    <span className="detail-key">Matched rules:</span>
+                    <ul>
+                      {r.matchedRules.map((rule, i) => (
+                        <li key={i}>{rule}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {r.approvals && r.approvals.length > 0 && (
                   <div className="detail-approvals">
                     <span className="detail-key">Approvals:</span>
@@ -291,10 +300,10 @@ export default function BatchResults({ data }) {
                     </li>
                   ))}
                 </ul>
-                {r.input && (
+                {(r.input || r.inputSummary) && (
                   <div className="detail-input">
                     <span className="detail-key">Submitted data:</span>
-                    <pre>{JSON.stringify(r.input, null, 2)}</pre>
+                    <pre>{JSON.stringify(r.input || r.inputSummary, null, 2)}</pre>
                   </div>
                 )}
               </div>

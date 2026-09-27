@@ -10,7 +10,7 @@
  * the pure validation helper only; runtime behavior is tested in tests/batch/.
  */
 
-const { validateBatchInput, DEFAULT_MAX_BATCH_SIZE } = require('../../src/domain/batchProcessor');
+const { validateBatchInput, assignParcelIds, findDuplicateParcelId, DEFAULT_MAX_BATCH_SIZE } = require('../../src/domain/batchProcessor');
 
 // --- Helper: a valid parcel data object ---
 function validParcel(overrides = {}) {
@@ -112,5 +112,37 @@ describe('validateBatchInput', () => {
     });
     expect(result.valid).toBe(true);
     expect(result.parcels).toHaveLength(4);
+  });
+});
+
+describe('assignParcelIds / findDuplicateParcelId (final ID invariant)', () => {
+  test('generates P{index+1} IDs without mutating input', () => {
+    const input = [validParcel(), validParcel()];
+    delete input[0].parcelId;
+    delete input[1].parcelId;
+    const assigned = assignParcelIds(input);
+    expect(assigned[0].parcelId).toBe('P1');
+    expect(assigned[1].parcelId).toBe('P2');
+    expect(input[0].parcelId).toBeUndefined();
+  });
+
+  test('keeps explicit IDs untouched', () => {
+    const assigned = assignParcelIds([validParcel({ parcelId: 'X9' }), validParcel()]);
+    expect(assigned[0].parcelId).toBe('X9');
+    expect(assigned[1].parcelId).toBe('P2');
+  });
+
+  test('detects generated ID colliding with an explicit ID', () => {
+    // Parcel A gets generated P1; parcel B explicitly claims P1.
+    const assigned = assignParcelIds([
+      validParcel(),
+      validParcel({ parcelId: 'P1' }),
+    ]);
+    expect(findDuplicateParcelId(assigned)).toContain('Duplicate parcelId');
+  });
+
+  test('accepts fully unique final IDs', () => {
+    const assigned = assignParcelIds([validParcel(), validParcel({ parcelId: 'X9' })]);
+    expect(findDuplicateParcelId(assigned)).toBeNull();
   });
 });

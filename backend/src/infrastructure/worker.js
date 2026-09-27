@@ -7,10 +7,11 @@
  *
  * Architecture (Redis chunk checkpointing, no database):
  *   Queue { batchId } → Worker → Load batch state from Redis
- *     → Atomically claim next PENDING chunk (SET NX PX lock; stale locks
- *       expire and become reclaimable) → Validate (domain) → Route (domain)
- *     → Checkpoint results + mark chunk DONE in ONE MULTI/EXEC unit
- *     → Progress derived from checkpoint state → Claim next chunk
+ *     → Atomically claim next chunk (unique ownership token per claim;
+ *       stale locks expire and become reclaimable) → Validate → Route
+ *     → Ownership-checked checkpoint (commits ONLY if our token still
+ *       holds the lock) → Progress derived from checkpoint state
+ *     → Claim next chunk
  *
  * Two layers:
  * - Chunk checkpoints = recovery optimization. A retry SKIPS DONE chunks,
@@ -186,7 +187,14 @@ async function processBatchJob(job, options = {}) {
   // retry never recomputes checkpointed work. Unexpected failures release our
   // active claim and propagate (see catch).
   let chunksCompletedByThisExecution = 0;
+  let consecutiveStaleCheckpoints = 0;
   let activeChunk = null;
+
+  // Bound consecutive stale rejections: a healthy lease always outlives one
+  // chunk's processing, so repeated staleness means CHUNK_LEASE_MS is
+  // misconfigured shorter than chunk processing time — fail loudly instead
+  // of spinning claim→reject forever.
+  const maxStale = Math.max(1, (await store.getChunkProgress(batchId)).totalChunks) * 3;
 
   try {
     for (;;) {
@@ -219,22 +227,43 @@ async function processBatchJob(job, options = {}) {
         }
       }
 
-      // Step 5: Checkpoint (results + DONE + TTL refresh) as one MULTI/EXEC
-      // unit. A crash before it leaves the chunk reclaimable; parcel-level
-      // HSETNX absorbs duplicates on recompute.
-      const { duplicates } = await store.checkpointChunk(
+      // Step 5: Ownership-checked checkpoint. Commits ONLY if our claim
+      // token still holds the lock. If our lease expired and another worker
+      // reclaimed the chunk, the checkpoint is rejected: log and move on —
+      // the owning worker will complete it (no corrupt overwrite, no stolen
+      // lock deletion). A crash before commit leaves the chunk reclaimable;
+      // parcel-level HSETNX absorbs duplicates on recompute.
+      const checkpoint = await store.checkpointChunk(
         batchId,
         chunk.chunkIndex,
+        chunk.token,
         chunkResults,
         chunkSuccessful,
         chunkFailed,
       );
 
-      if (duplicates > 0) {
+      if (!checkpoint.committed) {
+        logger.warn('Stale checkpoint rejected; chunk owned elsewhere', {
+          batchId,
+          chunkIndex: chunk.chunkIndex,
+        });
+        activeChunk = null;
+        consecutiveStaleCheckpoints++;
+        if (consecutiveStaleCheckpoints > maxStale) {
+          throw new Error(
+            `Chunk checkpoints repeatedly rejected as stale for batch ${batchId}: ` +
+            'CHUNK_LEASE_MS is likely shorter than chunk processing time.',
+          );
+        }
+        continue;
+      }
+      consecutiveStaleCheckpoints = 0;
+
+      if (checkpoint.duplicates > 0) {
         logger.warn('Duplicate parcel results absorbed by idempotency', {
           batchId,
           chunkIndex: chunk.chunkIndex,
-          duplicates,
+          duplicates: checkpoint.duplicates,
         });
       }
 
@@ -251,13 +280,13 @@ async function processBatchJob(job, options = {}) {
       await new Promise((resolve) => setImmediate(resolve));
     }
   } catch (err) {
-    // UNEXPECTED failure: release our still-held claim so a retry can reclaim
-    // this chunk immediately (no-op if already DONE or owned elsewhere),
-    // record a system error (not a parcel failure), and propagate so the
-    // queue retry mechanism works.
+    // UNEXPECTED failure: release our still-held claim (ownership token, so
+    // a reclaim by another worker is never disturbed) so a retry can reclaim
+    // this chunk immediately. Record a system error (not a parcel failure),
+    // and propagate so the queue retry mechanism works.
     if (activeChunk) {
       try {
-        await store.releaseChunk(batchId, activeChunk.chunkIndex, executionId);
+        await store.releaseChunk(batchId, activeChunk.chunkIndex, activeChunk.token);
       } catch (releaseErr) {
         logger.warn('Failed to release chunk claim after error', {
           batchId,

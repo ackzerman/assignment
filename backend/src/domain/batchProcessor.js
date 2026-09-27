@@ -44,10 +44,10 @@ function validateBatchInput(data, maxBatchSize = DEFAULT_MAX_BATCH_SIZE) {
     };
   }
 
-  // Duplicate parcel IDs would create ambiguous results for the same
-  // parcelId within one batch. Reject them up front instead.
-  // Only explicitly provided IDs are checked; parcels without an ID receive
-  // an auto-generated one later and are unaffected.
+  // Duplicate EXPLICIT parcel IDs are rejected here. Generated IDs are
+  // assigned afterwards (see assignParcelIds) and the FINAL uniqueness of
+  // every parcelId is enforced then — so a generated P{N} can never silently
+  // collide with an explicit "P{N}".
   const seenIds = new Set();
   for (let i = 0; i < data.parcels.length; i++) {
     const parcel = data.parcels[i];
@@ -66,7 +66,41 @@ function validateBatchInput(data, maxBatchSize = DEFAULT_MAX_BATCH_SIZE) {
   return { valid: true, parcels: data.parcels };
 }
 
+/**
+ * Assigns fallback parcel IDs (`P{index+1}`) to parcels that do not provide
+ * one. Pure function — returns a new array, never mutates the input.
+ */
+function assignParcelIds(parcels) {
+  return parcels.map((p, i) => {
+    if (p && typeof p === 'object' && (p.parcelId === undefined || p.parcelId === null || p.parcelId === '')) {
+      return { ...p, parcelId: `P${i + 1}` };
+    }
+    return p;
+  });
+}
+
+/**
+ * Enforces the final invariant: every parcel in the batch has a unique
+ * parcelId (explicit or generated). Returns an error string, or null.
+ */
+function findDuplicateParcelId(parcels) {
+  const seen = new Set();
+  for (let i = 0; i < parcels.length; i++) {
+    const parcel = parcels[i];
+    const id = parcel && typeof parcel === 'object' ? parcel.parcelId : undefined;
+    if (id === undefined || id === null || id === '') continue;
+    const key = String(id);
+    if (seen.has(key)) {
+      return `Duplicate parcelId "${id}" in batch (index ${i}). Parcel IDs must be unique within a batch.`;
+    }
+    seen.add(key);
+  }
+  return null;
+}
+
 module.exports = {
   validateBatchInput,
+  assignParcelIds,
+  findDuplicateParcelId,
   DEFAULT_MAX_BATCH_SIZE,
 };

@@ -94,6 +94,38 @@ describe('API contracts', () => {
     expect(page3.body.data.results[0].parcelId).toBe('P5');
   });
 
+  it('results expose the ONE canonical contract the UI renders', async () => {
+    const created = await request(app)
+      .post('/api/batches')
+      .send({ parcels: [
+        { weight: 5, value: 2000, destinationCountry: 'DE', parcelId: 'P1' },
+        { weight: -1, value: 10, destinationCountry: 'DE', parcelId: 'P2' },
+      ] });
+    const batchId = created.body.data.batchId;
+
+    const { processBatchJob } = require('../../src/infrastructure/worker');
+    await processBatchJob({ id: 'job-contract-shape', data: { batchId }, updateProgress: async () => {} });
+
+    const res = await request(app).get(`/api/batches/${batchId}/results?limit=10&offset=0`);
+    expect(res.status).toBe(200);
+    const [routed, invalid] = res.body.data.results;
+
+    // Routed row: everything BatchResults renders.
+    expect(routed).toMatchObject({ parcelId: 'P1', status: 'routed', department: 'Regular' });
+    expect(routed.requiresApproval).toBe(true);
+    expect(routed.approvals).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'Insurance' })]),
+    );
+    expect(routed.matchedRules).toContain('department.regular');
+    expect(routed.reasons.length).toBeGreaterThan(0);
+    expect(routed.inputSummary).toMatchObject({ weight: 5, value: 2000, destinationCountry: 'DE' });
+
+    // Invalid row: errors + submitted data for the error panel.
+    expect(invalid).toMatchObject({ parcelId: 'P2', status: 'invalid' });
+    expect(invalid.errors.length).toBeGreaterThan(0);
+    expect(invalid.inputSummary).toMatchObject({ destinationCountry: 'DE' });
+  });
+
   it('GET unknown/expired batch returns 404', async () => {
     const res = await request(app).get('/api/batches/BATCH-does-not-exist');
     expect(res.status).toBe(404);

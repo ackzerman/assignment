@@ -48,7 +48,7 @@ describe('Worker routing-engine failure', () => {
     );
 
     const job = { id: 'job-engine', data: { batchId }, updateProgress: jest.fn(async () => {}) };
-    await expect(processBatchJob(job, { leaseMs: 0 })).rejects.toThrow('engine bug');
+    await expect(processBatchJob(job, { leaseMs: 60000 })).rejects.toThrow('engine bug');
 
     // System error recorded (not a parcel failure), nothing stored as
     // an 'error' parcel row, claim released, batch left recoverable.

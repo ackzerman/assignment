@@ -27,9 +27,10 @@ For each decision, we outline:
 12. [Decision 11: Testing Strategy & Regression Safety (Pure Domain Testing)](#decision-11-testing-strategy--regression-safety-pure-domain-testing)
 13. [Decision 12: Interview Debuggability Design (Debugging Scenario Readiness)](#decision-12-interview-debuggability-design-debugging-scenario-readiness)
 14. [Decision 13: Batch Processing Format (JSON vs XML)](#decision-13-batch-processing-format-json-vs-xml)
-15. [Decision 14: Batch Processing Architecture (Chunked Sync vs Job Queue)](#decision-14-batch-processing-architecture-chunked-sync-vs-job-queue)
+15. [Decision 14: Batch Processing Architecture (Async Queue + Redis Checkpoints)](#decision-14-batch-processing-architecture-chunked-sync-vs-job-queue)
 16. [Decision 15: New Rule Addition Workflow (Feature Branch → Merge)](#decision-15-new-rule-addition-workflow-feature-branch--merge)
 17. [Decision 16: Regression Testing Strategy (Parameterized Snapshot Table)](#decision-16-regression-testing-strategy-parameterized-snapshot-table)
+18. [Decision 17: Chunk Ownership Tokens + Alerting Scope](#decision-17-chunk-ownership-tokens--alerting-scope)
 
 ---
 
@@ -594,10 +595,11 @@ needs asynchronous processing with failure recovery, and no permanent history:
 - `POST /api/batches` → validate → verify Redis → create temporary Redis state
   (meta + input + `PENDING` chunk checkpoints, all TTL-expired) → BullMQ job
   carrying `{ batchId }` only → `202`
-- Worker atomically claims one chunk at a time (`SET lock NX PX`, only one
-  winner; stale locks expire and are reclaimable), routes it through the
-  shared domain core, and checkpoints (parcel results via `HSETNX` +
-  chunk `DONE` + TTL refresh) in one `MULTI/EXEC` unit
+- Worker atomically claims one chunk at a time (unique ownership token per
+  claim; stale locks expire and are reclaimable), routes it through the
+  shared domain core, and checkpoints only if its token still holds the lock
+  (parcel results via `HSETNX` + chunk `DONE` + TTL refresh) in one atomic
+  Lua script
 - Progress derives from checkpoint state, so retries never double-count;
   parcel-level `HSETNX` is the final idempotency safeguard
 - No database, no authentication, no permanent batch listing: the API is
@@ -611,10 +613,11 @@ computation is minimized but not mathematically eliminated under a crash
 occurring between computation and checkpoint.
 
 ### Key Implementation Details
-- `POST /api/batches` validates the envelope (incl. duplicate parcel IDs), then `enqueueBatch()` verifies Redis, applies backpressure, creates TTL state, and enqueues; queue failure deletes the temporary state and returns 503
-- The worker (`worker.js`) claims/releases/checkpoints via `batchStore.js`; chunk size defaults to `BATCH_CHUNK_SIZE` (500), lease `CHUNK_LEASE_MS` (5 min, matching the BullMQ lock duration)
-- Each parcel is validated and routed independently (mixed-validity handling → `COMPLETED_WITH_ERRORS`, never a silent drop)
-- `validateBatchInput()` rejects batches over 10,000 parcels as a safety limit; results pages are capped (`RESULTS_MAX_LIMIT`) and the UI paginates
+- `POST /api/batches` assigns missing parcel IDs first, then enforces uniqueness across the FINAL IDs (generated `P{N}` can never silently collide with explicit `"P{N}"`); `enqueueBatch()` verifies Redis, applies backpressure, creates TTL state, and enqueues; queue failure deletes the temporary state and returns 503
+- The worker (`worker.js`) claims/releases/checkpoints via `batchStore.js` with per-claim ownership tokens; chunk size defaults to `BATCH_CHUNK_SIZE` (500), lease `CHUNK_LEASE_MS` (5 min, matching the BullMQ lock duration — far above realistic per-chunk processing time, so no lease renewal is needed)
+- Each parcel is validated and routed independently (mixed-validity handling → `COMPLETED_WITH_ERRORS`, never a silent drop); unexpected system errors propagate to BullMQ retry and are recorded in the error metric, never stored as parcel rows
+- `validateBatchInput()` rejects batches over 10,000 parcels as a safety limit; results pages are capped (`RESULTS_MAX_LIMIT`) and the UI paginates (200/page, full result set reachable)
+- Batch results follow ONE canonical contract (`parcelId/index/status/department/requiresApproval/approvals/matchedRules/reasons/errors/inputSummary`) rendered directly by the UI
 
 ### Interview Talking Points
 - "The queue owns the work and Redis owns temporary state — both expire, because the flow ends at result display, not permanent history."
@@ -719,4 +722,43 @@ This is both a test AND documentation. Anyone reading this table can understand 
 - "The regression table serves as living documentation — if you want to know what the system does for any input, look at this table."
 - "Adding a row takes 10 seconds. Removing a row would require an explicit decision to change expected behavior."
 - "Jest's `test.each` generates descriptive test names like `5kg + €5000.01 → Regular, approvals: ['Insurance', 'Manual Review']` — these read like a specification."
+
+---
+
+## Decision 17: Chunk Ownership Tokens + Alerting Scope
+
+### Context & Problem Statement
+
+A plain `SET NX PX` lock proves *someone* holds a chunk, but after the lease
+expires a stale worker can no longer tell whether it still owns the chunk:
+it could mark `DONE`, delete the new owner's lock, and corrupt progress.
+Separately, the assessment asks that the team be notified of failures, but
+no external alerting channel exists in the repo.
+
+### Chosen Decision & Rationale
+
+**Ownership tokens (correctness):** every successful claim mints a unique
+`{workerId}:{uuid}` token stored as the lock value. Checkpoint and release
+are single Lua scripts that act ONLY when the lock still holds the caller's
+token — otherwise they change nothing and report rejection. Consequences:
+
+- A stale worker cannot checkpoint, cannot mark `DONE`, cannot delete
+  another worker's lock, and cannot corrupt progress — rejection is atomic.
+- A lease that outlives realistic per-chunk processing (5 min default vs
+  millisecond-scale chunks) plus ownership verification is the simplest safe
+  combination; no renewal thread, no distributed lock framework.
+- Repeated stale rejections fail the job loudly (likely `CHUNK_LEASE_MS`
+  misconfiguration) instead of spinning claim→reject forever.
+
+**Alerting scope (honesty):** current observability is structured logs +
+metrics + anomaly detection exposed via `GET /api/health/detailed` — no
+Slack/email/PagerDuty integration is claimed. Production extension: forward
+the anomaly/critical-error signals to an external channel. Deliberately out
+of scope here; the docs say so explicitly.
+
+### Interview Talking Points
+- "The token turns 'I once held this chunk' into a checkable fact: the commit
+  itself verifies ownership, so races resolve to at most one winner."
+- "We monitor everything an alerting platform would need; wiring the last
+  mile (Slack/PagerDuty) is a deployment task, not an architecture gap."
 

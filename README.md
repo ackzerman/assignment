@@ -53,7 +53,7 @@ assignment/
 cd backend
 npm install
 npm run dev        # Start development server (port 3001)
-npm test           # Run 195 automated tests
+npm test           # Run 205 automated tests
 ```
 
 ### Frontend
@@ -62,6 +62,7 @@ npm test           # Run 195 automated tests
 cd frontend
 npm install
 npm run dev        # Start development server (port 5173)
+npm test           # Run frontend unit tests (vitest: pagination + API client)
 ```
 
 ## API Contracts
@@ -87,7 +88,34 @@ Legacy alias kept: `POST /api/parcels/route` (single). There is exactly one batc
 - `BATCH_CHUNK_SIZE` (default `500`) — parcels per worker recovery checkpoint.
 - `CHUNK_LEASE_MS` (default `300000`) — chunk claim lease; stale `PROCESSING` chunks become reclaimable after expiry.
 
-Mental model: **BullMQ = durable work ("what needs to happen"), Redis batch state = temporary progress/results ("what happened", TTL-expired).** Chunk checkpoints (`PENDING → PROCESSING → DONE`, atomic `SET NX PX` claim) are the recovery optimization — retries skip `DONE` work. Parcel-level `HSETNX` result writes are the final idempotency safeguard. Duplicate computation is minimized but not mathematically eliminated under a crash occurring between computation and checkpoint.
+Mental model: **BullMQ = durable work ("what needs to happen"), Redis batch state = temporary progress/results ("what happened", TTL-expired).** Chunk checkpoints (`PENDING → PROCESSING → DONE`) are the recovery optimization — retries skip `DONE` work. Each claim mints a unique ownership token; checkpoint/release commit only when the lock still holds the caller's token (atomic Lua scripts), so a stale worker can never overwrite another worker's chunk. Parcel-level `HSETNX` result writes are the final idempotency safeguard. Duplicate computation is minimized but not mathematically eliminated under a crash occurring between computation and checkpoint.
+
+## Batch Result Contract
+
+`GET /api/batches/:batchId/results` returns the single canonical representation the UI renders — one object per parcel:
+
+```json
+{
+  "parcelId": "P1",
+  "index": 0,
+  "status": "routed",
+  "department": "Regular",
+  "requiresApproval": true,
+  "approvals": [{ "type": "Insurance", "reason": "..." }],
+  "matchedRules": ["department.regular", "approval.insurance"],
+  "reasons": ["..."],
+  "errors": null,
+  "inputSummary": { "weight": 5, "value": 2000, "destinationCountry": "DE" }
+}
+```
+
+`status` is `routed` or `invalid` (validation failures carry `errors` + `inputSummary`; unexpected system failures never become parcel rows — the job fails and BullMQ retries). Parcel IDs are final at submission: missing IDs are generated as `P{index+1}` first, then uniqueness is enforced across all IDs, so generated and explicit IDs can never collide.
+
+## Observability & Alerting Scope
+
+Current: structured JSON logs (request/batch/parcel/job/worker IDs), in-memory operational metrics (`GET /api/metrics`), anomaly detection surfaced via `GET /api/health/detailed`, and liveness/readiness probes. No active notifications are sent — there is no Slack/email/PagerDuty integration.
+
+Production extension: connect the anomaly detector and critical-error log signals to an external alerting channel. Deliberately out of scope for this assessment.
 
 ## Business Rules
 

@@ -18,7 +18,7 @@
 
 const express = require('express');
 const { randomUUID } = require('crypto');
-const { validateBatchInput } = require('../../domain/batchProcessor');
+const { validateBatchInput, assignParcelIds, findDuplicateParcelId } = require('../../domain/batchProcessor');
 const store = require('../../infrastructure/batchStore');
 // Namespace import so tests can control availability via jest.spyOn(redis, ...).
 const redis = require('../../infrastructure/redis');
@@ -82,11 +82,18 @@ async function enqueueBatch(parcels, { requestId } = {}) {
   // Step 3: Strong unpredictable batch identifier (full UUID, not truncated).
   const batchId = `BATCH-${randomUUID()}`;
 
-  // Assign parcel IDs if not provided (duplicates already rejected by validation)
-  const parcelsWithIds = parcels.map((p, i) => ({
-    ...p,
-    parcelId: p.parcelId || `P${i + 1}`,
-  }));
+  // Generate IDs first, then enforce uniqueness on the FINAL representation:
+  // every parcel in the batch must have a unique parcelId, so a generated
+  // P{N} colliding with an explicit "P{N}" is rejected, not silently merged.
+  const parcelsWithIds = assignParcelIds(parcels);
+  const duplicateError = findDuplicateParcelId(parcelsWithIds);
+  if (duplicateError) {
+    logger.warn('Batch validation failed', {
+      requestId,
+      error: duplicateError,
+    });
+    throw new AppError(duplicateError, 400);
+  }
 
   logger.info('Creating batch', {
     requestId,

@@ -10,22 +10,24 @@
  *   batch:{id}:lock:{i} string claim lock (SET NX PX lease) — the atomic arbiter
  *   batch:{id}:results  hash   parcelIndex -> JSON routing result
  *
- * Two layers, same as before but Redis-backed:
+ * Two layers:
  * - Chunk checkpoints = recovery optimization (skip DONE chunks on retry).
  * - Parcel-level idempotency = correctness safeguard: results are written
- *   with HSETNX inside the checkpoint transaction, so a retried chunk can
- *   never create duplicate authoritative results.
+ *   with HSETNX inside the ownership-checked checkpoint, so a retried chunk
+ *   can never create duplicate authoritative results.
  *
  * Progress is DERIVED from checkpoint state (DONE chunk fields + results
  * hash size), never incremented per encounter — a retried chunk therefore
  * cannot double-count progress.
  *
- * Atomicity without Lua: chunk claiming uses SET key NX PX (single atomic
- * command — only one worker can hold a chunk's lock). Checkpointing uses
- * MULTI/EXEC so results + DONE + TTL refresh commit as one logical unit.
+ * Atomicity via Lua: claiming, ownership-checked checkpointing, and
+ * ownership-checked release each execute as a single atomic script, so a
+ * stale worker can never commit work it no longer owns — even if its lease
+ * expired and another worker reclaimed the chunk in between.
  */
 
 const { getRedisClient } = require('./redis');
+const { randomUUID } = require('crypto');
 const { logger } = require('../observability/logger');
 
 function getBatchTTLSeconds() {
@@ -59,6 +61,79 @@ function keys(batchId) {
     lockPattern: `${p}:lock:*`,
   };
 }
+
+/**
+ * Ownership tokens: every successful claim mints a UNIQUE token
+ * (`{workerId}:{uuid}`). The lock key holds the token; checkpoint and
+ * release scripts only act when the lock still holds OUR token. A stale
+ * worker (lease expired, chunk reclaimed by someone else) can therefore
+ * never mark DONE, never delete another worker's lock, and never corrupt
+ * progress — its commit is rejected atomically.
+ */
+function mintToken(workerId) {
+  return `${workerId}:${randomUUID()}`;
+}
+
+// Atomic claim: skip DONE, win SET NX PX, re-check DONE, record PROCESSING.
+// The lock holds a UNIQUE per-claim token; the field keeps the human
+// workerId for observability. Returns the token on success, nil otherwise.
+const CLAIM_SCRIPT = [
+  "local field = redis.call('hget', KEYS[2], ARGV[3])",
+  'if not field then return nil end',
+  "if string.sub(field, 1, 4) == 'DONE' then return nil end",
+  "local ok = redis.call('set', KEYS[1], ARGV[1], 'PX', ARGV[4], 'NX')",
+  'if ok == false then return nil end',
+  "field = redis.call('hget', KEYS[2], ARGV[3])",
+  "if field and string.sub(field, 1, 4) == 'DONE' then",
+  "  redis.call('del', KEYS[1])",
+  '  return nil',
+  'end',
+  "redis.call('hset', KEYS[2], ARGV[3], 'PROCESSING:' .. ARGV[2] .. ':' .. ARGV[6])",
+  "redis.call('expire', KEYS[2], ARGV[5])",
+  "redis.call('expire', KEYS[3], ARGV[5])",
+  "redis.call('expire', KEYS[4], ARGV[5])",
+  'return ARGV[1]',
+].join('\n');
+
+// Atomic ownership-checked checkpoint: ONLY the current lock holder commits.
+// Returns {committed, inserted, duplicates}; stale holders get {0,0,0}.
+const CHECKPOINT_SCRIPT = [
+  "if redis.call('get', KEYS[1]) ~= ARGV[1] then",
+  '  return {0, 0, 0}',
+  'end',
+  'local inserted = 0',
+  'local dups = 0',
+  'local i = 6',
+  'while i <= #ARGV do',
+  "  if redis.call('hsetnx', KEYS[3], ARGV[i], ARGV[i + 1]) == 1 then",
+  '    inserted = inserted + 1',
+  '  else',
+  '    dups = dups + 1',
+  '  end',
+  '  i = i + 2',
+  'end',
+  "redis.call('hset', KEYS[2], ARGV[2], 'DONE:' .. ARGV[3] .. ':' .. ARGV[4])",
+  "redis.call('del', KEYS[1])",
+  "redis.call('expire', KEYS[2], ARGV[5])",
+  "redis.call('expire', KEYS[3], ARGV[5])",
+  "redis.call('expire', KEYS[4], ARGV[5])",
+  "redis.call('expire', KEYS[5], ARGV[5])",
+  'return {1, inserted, dups}',
+].join('\n');
+
+// Atomic ownership-checked release: only the lock holder resets to PENDING
+// (and only from PROCESSING — never from DONE) and deletes its own lock.
+const RELEASE_SCRIPT = [
+  "if redis.call('get', KEYS[1]) ~= ARGV[1] then",
+  '  return 0',
+  'end',
+  "local field = redis.call('hget', KEYS[2], ARGV[2])",
+  "if field and string.sub(field, 1, 10) == 'PROCESSING' then",
+  "  redis.call('hset', KEYS[2], ARGV[2], 'PENDING')",
+  'end',
+  "redis.call('del', KEYS[1])",
+  'return 1',
+].join('\n');
 
 function parseChunkField(raw, chunkIndex) {
   if (raw === undefined || raw === null) return null;
@@ -231,40 +306,43 @@ async function getChunkProgress(batchId) {
 }
 
 /**
- * Atomically claims a chunk: SET lock NX PX is a single atomic command, so
- * exactly one worker wins. A DONE chunk is never claimed (lock released if
- * taken). A stale lock (holder crashed, key expired via PX) is reclaimable
- * by any worker retrying SET NX.
+ * Atomically claims a specific chunk for a worker (single Lua script).
  *
- * @returns the claimed chunk { chunkIndex, status: 'PROCESSING', ... } or null
+ * Only one worker can win a given chunk: the script skips DONE chunks and
+ * requires winning SET NX PX. A stale lock (holder crashed, key expired via
+ * PX) is reclaimable by any worker. The returned unique token is the ONLY
+ * credential accepted by checkpoint/release for this claim.
+ *
+ * @param {string} batchId
+ * @param {number} chunkIndex
+ * @param {string} workerId - Human identity recorded on the chunk
+ * @param {number} [leaseMs] - Lease duration from now
+ * @returns {object|null} Claimed chunk (with `token`) or null
  */
 async function claimChunk(batchId, chunkIndex, workerId, leaseMs = getDefaultChunkLeaseMs()) {
   const redis = await getRedisClient();
   const k = keys(batchId);
+  const token = mintToken(workerId);
 
-  const current = await redis.hget(k.chunks, chunkIndex);
-  if (current === undefined || current === null) return null;
-  if (current.startsWith('DONE')) return null;
+  const won = await redis.eval(
+    CLAIM_SCRIPT,
+    4,
+    k.lock(chunkIndex),
+    k.chunks,
+    k.meta,
+    k.results,
+    token,
+    workerId,
+    chunkIndex,
+    leaseMs,
+    getBatchTTLSeconds(),
+    Date.now(),
+  );
+  if (!won) return null;
 
-  const acquired = await redis.set(k.lock(chunkIndex), workerId, 'PX', leaseMs, 'NX');
-  if (acquired !== 'OK') return null;
-
-  // Re-check after winning the lock: the chunk may have completed concurrently.
-  const rechecked = await redis.hget(k.chunks, chunkIndex);
-  if (rechecked !== undefined && rechecked !== null && rechecked.startsWith('DONE')) {
-    await redis.del(k.lock(chunkIndex));
-    return null;
-  }
-
-  const leaseExpiresAt = Date.now() + leaseMs;
-  const multi = redis.multi();
-  multi.hset(k.chunks, chunkIndex, `PROCESSING:${workerId}:${leaseExpiresAt}`);
-  multi.expire(k.meta, getBatchTTLSeconds());
-  multi.expire(k.chunks, getBatchTTLSeconds());
-  multi.expire(k.results, getBatchTTLSeconds());
-  await multi.exec();
-
-  return getChunk(batchId, chunkIndex);
+  const chunk = await getChunk(batchId, chunkIndex);
+  if (!chunk) return null;
+  return { ...chunk, token };
 }
 
 /**
@@ -282,79 +360,85 @@ async function claimNextChunk(batchId, workerId, leaseMs = getDefaultChunkLeaseM
 }
 
 /**
- * Releases our own PROCESSING claim back to PENDING so a retry reclaims it
- * immediately instead of waiting for lock expiry. Never touches DONE chunks
- * or claims owned by another live worker (a live holder always owns the lock
- * key; an expired/missing lock with our field means nobody holds it).
+ * Releases a claim back to PENDING — but ONLY if the caller still holds the
+ * exact ownership token (single Lua script). A stale worker whose chunk was
+ * reclaimed gets 0 and changes nothing: never touches DONE chunks, never
+ * deletes another worker's lock.
+ *
+ * @param {string} batchId
+ * @param {number} chunkIndex
+ * @param {string} token - Ownership token returned by claimChunk
+ * @returns {boolean} true if our claim was released
  */
-async function releaseChunk(batchId, chunkIndex, workerId) {
+async function releaseChunk(batchId, chunkIndex, token) {
   const redis = await getRedisClient();
   const k = keys(batchId);
-  const [field, lockOwner] = await Promise.all([
-    redis.hget(k.chunks, chunkIndex),
-    redis.get(k.lock(chunkIndex)),
-  ]);
-  if (!field || !field.startsWith(`PROCESSING:${workerId}:`)) {
-    return false;
-  }
-  if (lockOwner !== null && lockOwner !== undefined && lockOwner !== workerId) {
-    return false;
-  }
-  const multi = redis.multi();
-  multi.hset(k.chunks, chunkIndex, 'PENDING');
-  multi.del(k.lock(chunkIndex));
-  const res = await multi.exec();
-  return !!res;
+  const released = await redis.eval(
+    RELEASE_SCRIPT,
+    2,
+    k.lock(chunkIndex),
+    k.chunks,
+    token,
+    chunkIndex,
+  );
+  return released === 1;
 }
 
 /**
- * Checkpoint: stores the chunk's results (HSETNX per parcel = parcel-level
- * idempotency: retries can never duplicate authoritative results), marks the
- * chunk DONE with its outcome, and refreshes TTLs — as ONE MULTI/EXEC unit.
- * A chunk is therefore never reported DONE before its results are stored.
+ * Ownership-checked checkpoint (single Lua script): ONLY the current lock
+ * holder commits. Stores the chunk's results (HSETNX per parcel =
+ * parcel-level idempotency: retries can never duplicate authoritative
+ * results), marks the chunk DONE with its outcome, deletes its own lock,
+ * and refreshes TTLs — atomically. A chunk is therefore never reported DONE
+ * before its results are stored, and a stale worker can never overwrite the
+ * state of the worker that reclaimed the chunk.
+ *
+ * @param {string} batchId
+ * @param {number} chunkIndex
+ * @param {string} token - Ownership token returned by claimChunk
+ * @param {Array} results - Parcel result objects for this chunk
+ * @param {number} successful - Routed count in this chunk
+ * @param {number} failed - Invalid/error count in this chunk
+ * @returns {{ committed: boolean, inserted: number, duplicates: number }}
  */
-async function checkpointChunk(batchId, chunkIndex, results, successful, failed) {
+async function checkpointChunk(batchId, chunkIndex, token, results, successful, failed) {
   const redis = await getRedisClient();
   const k = keys(batchId);
   const ttl = getBatchTTLSeconds();
 
-  const args = [];
+  const argv = [token, chunkIndex, successful, failed, ttl];
   for (const r of results) {
-    args.push(r.index, JSON.stringify(serializeResult(r)));
+    argv.push(r.index, JSON.stringify(serializeResult(r)));
   }
 
-  const multi = redis.multi();
-  if (args.length > 0) {
-    // HSETNX each parcel result: 1 = newly stored, 0 = already present.
-    for (let i = 0; i < args.length; i += 2) {
-      multi.hsetnx(k.results, args[i], args[i + 1]);
-    }
-  }
-  multi.hset(k.chunks, chunkIndex, `DONE:${successful}:${failed}`);
-  multi.del(k.lock(chunkIndex));
-  multi.expire(k.meta, ttl);
-  multi.expire(k.chunks, ttl);
-  multi.expire(k.results, ttl);
-  multi.expire(k.input, ttl);
-  const replies = await multi.exec();
-
-  let inserted = 0;
-  let duplicates = 0;
-  const hsetnxReplies = replies.slice(0, args.length / 2);
-  for (const [err, value] of hsetnxReplies) {
-    if (!err && value === 1) inserted++;
-    else duplicates++;
-  }
-  return { inserted, duplicates };
+  const [committed, inserted, duplicates] = await redis.eval(
+    CHECKPOINT_SCRIPT,
+    5,
+    k.lock(chunkIndex),
+    k.chunks,
+    k.results,
+    k.meta,
+    k.input,
+    ...argv,
+  );
+  return { committed: committed === 1, inserted, duplicates };
 }
 
+/**
+ * THE canonical batch result contract (single representation used by the
+ * results API and the frontend). Every field the UI needs is present:
+ * parcelId, index, status, department, requiresApproval, approvals
+ * ({type, reason}), matchedRules, reasons, errors, inputSummary.
+ */
 function serializeResult(r) {
+  const approvals = r.approvals || [];
   return {
     parcelId: r.parcelId,
     index: r.index,
     status: r.status,
     department: r.department || null,
-    approvals: r.approvals || [],
+    requiresApproval: approvals.length > 0,
+    approvals,
     matchedRules: r.matchedRules || [],
     reasons: r.reasons || [],
     errors: r.errors || null,

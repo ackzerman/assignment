@@ -70,6 +70,36 @@ describe('Batch creation paths', () => {
     expect(res.body.message).toContain('Duplicate parcelId');
   });
 
+  it('rejects a generated ID colliding with an explicit ID', async () => {
+    // First parcel gets generated P1, second explicitly claims P1.
+    const res = await request(app)
+      .post('/api/batches')
+      .send({
+        parcels: [
+          { weight: 1, value: 10, destinationCountry: 'DE' },
+          { weight: 2, value: 20, destinationCountry: 'DE', parcelId: 'P1' },
+        ],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('Duplicate parcelId');
+  });
+
+  it('accepts batches with valid generated and unique explicit IDs', async () => {
+    const res = await request(app)
+      .post('/api/batches')
+      .send({
+        parcels: [
+          { weight: 1, value: 10, destinationCountry: 'DE' },
+          { weight: 2, value: 20, destinationCountry: 'DE', parcelId: 'CUSTOM-9' },
+        ],
+      });
+
+    expect(res.status).toBe(202);
+    const input = await store.getBatchInput(res.body.data.batchId);
+    expect(input.map((p) => p.parcelId)).toEqual(['P1', 'CUSTOM-9']);
+  });
+
   it('queue failure after state creation deletes state and returns 503', async () => {
     queue.addBatchJob.mockRejectedValueOnce(new Error('redis down'));
     const deleted = [];
