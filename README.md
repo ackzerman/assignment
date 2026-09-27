@@ -47,7 +47,7 @@ assignment/
 cd backend
 npm install
 npm run dev        # Start development server (port 3001)
-npm test           # Run 72 automated tests
+npm test           # Run 167 automated tests
 ```
 
 ### Frontend
@@ -57,6 +57,27 @@ cd frontend
 npm install
 npm run dev        # Start development server (port 5173)
 ```
+
+## API Contracts
+
+| Method | Endpoint | Meaning |
+|---|---|---|
+| `POST` | `/api/parcels` | Single parcel, sync, `200` + `{ parcelId, department, approvals, matchedRules, reasons }` |
+| `POST` | `/api/batches` | Create batch, async, `202` + `{ batchId, status: QUEUED }` |
+| `GET` | `/api/batches/:batchId` | Poll progress `{ status, total, processed, successful, failed, progress }` |
+| `GET` | `/api/batches/:batchId/results` | Persisted results (paginated `?limit&offset`) |
+| `GET` | `/health/live` | Liveness: is the process alive? |
+| `GET` | `/health/ready` | Readiness: DB + queue reachable? |
+| `GET` | `/api/metrics` | Counters: HTTP, routing, jobs, queue depth, latencies |
+
+Legacy aliases kept: `POST /api/parcels/route`, `POST /api/parcels/batch` (sync).
+
+## Configuration (`backend/.env.example`)
+
+- `API_TOKENS` — optional Bearer tokens; when set, batches are owned and cross-owner reads → `403`.
+- `MAX_QUEUE_DEPTH` (default `100`) — backpressure limit; over-limit `POST /api/batches` → `429 + Retry-After`.
+- `REDIS_HOST` / `REDIS_PORT` — BullMQ durable queue; retries `3` with exponential backoff `1s→2s→4s`.
+- Queue payload is `{ batchId }` only; worker loads data from DB. Results protected by `UNIQUE(batch_id, parcel_id)`.
 
 ## Core Architecture Decisions Summary
 

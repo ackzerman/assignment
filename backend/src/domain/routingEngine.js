@@ -46,12 +46,22 @@ function routeParcel(parcel, options = {}) {
   const approvals = findApprovals(parcel, apprRules);
 
   // --- Build the routing result ---
+  // Master-prompt explainability contract: matchedRules (stable IDs) + reasons.
+  // Legacy fields (departmentRule, departmentReason, approvals objects) are kept
+  // for backward compatibility with existing tests/frontend.
+  const matchedRules = [
+    department.id || department.rule,
+    ...approvals.map((a) => a.id || a.rule),
+  ];
+  const reasons = [department.reason, ...approvals.map((a) => a.reason)];
   return {
     department: department.department,
     departmentReason: department.reason,
     departmentRule: department.rule,
     requiresApproval: approvals.length > 0,
     approvals,
+    matchedRules,
+    reasons,
     parcel,
     routedAt: new Date().toISOString(),
   };
@@ -75,6 +85,7 @@ function findDepartment(parcel, rules) {
         department: rule.department,
         reason: rule.reason(parcel),
         rule: rule.name,
+        id: rule.id || rule.name,
       };
     }
   }
@@ -104,6 +115,7 @@ function findApprovals(parcel, rules) {
         type: rule.type,
         reason: rule.reason(parcel),
         rule: rule.name,
+        id: rule.id || rule.name,
       });
     }
   }

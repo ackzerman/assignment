@@ -29,6 +29,17 @@ const metrics = {
   totalProcessingTimeMs: 0,
   approvalCounts: {},      // { Insurance: 45, 'Manual Review': 12 }
   errors: 0,
+  // Master Phase 9/12 strict observability
+  httpRequests: 0,
+  httpErrors: 0,           // responses with status >= 400
+  httpLatencyMsTotal: 0,
+  httpLatencyCount: 0,
+  jobsProcessed: 0,        // worker jobs completed
+  jobsFailed: 0,           // worker jobs failed (after all retries)
+  jobsRetried: 0,          // worker job attempts that will be retried
+  queueDepth: 0,           // last observed waiting+active+delayed
+  workerActiveJobs: 0,     // currently executing jobs
+  batchProcessingDurationMsTotal: 0,
   startedAt: new Date().toISOString(),
 };
 
@@ -77,6 +88,65 @@ function recordError() {
 }
 
 /**
+ * Records an HTTP request completion (Master: request count, error count, latency).
+ *
+ * @param {number} statusCode - Response status code
+ * @param {number} durationMs - Request duration in milliseconds
+ */
+function recordHttpRequest(statusCode, durationMs) {
+  metrics.httpRequests++;
+  metrics.httpLatencyMsTotal += durationMs;
+  metrics.httpLatencyCount++;
+  if (statusCode >= 400) {
+    metrics.httpErrors++;
+  }
+}
+
+/**
+ * Records a worker job completion.
+ *
+ * @param {number} durationMs - Job processing duration
+ */
+function recordJobCompleted(durationMs) {
+  metrics.jobsProcessed++;
+  if (typeof durationMs === 'number') {
+    metrics.batchProcessingDurationMsTotal += durationMs;
+  }
+}
+
+/**
+ * Records a worker job failure (terminal, after retries exhausted).
+ */
+function recordJobFailed() {
+  metrics.jobsFailed++;
+}
+
+/**
+ * Records a worker job attempt that will be retried.
+ */
+function recordJobRetry() {
+  metrics.jobsRetried++;
+}
+
+/**
+ * Sets the last observed queue depth (waiting + active + delayed).
+ *
+ * @param {number} depth
+ */
+function setQueueDepth(depth) {
+  metrics.queueDepth = depth;
+}
+
+/**
+ * Sets the current number of active worker jobs (worker utilization).
+ *
+ * @param {number} count
+ */
+function setWorkerActiveJobs(count) {
+  metrics.workerActiveJobs = count;
+}
+
+/**
  * Returns a snapshot of all metrics including computed values.
  */
 function getMetrics() {
@@ -98,6 +168,15 @@ function getMetrics() {
     uptime: getUptime(),
     avgProcessingTimeMs: total > 0
       ? (metrics.totalProcessingTimeMs / total).toFixed(2)
+      : 0,
+    avgHttpLatencyMs: metrics.httpLatencyCount > 0
+      ? Number((metrics.httpLatencyMsTotal / metrics.httpLatencyCount).toFixed(2))
+      : 0,
+    httpErrorRate: metrics.httpRequests > 0
+      ? Number(((metrics.httpErrors / metrics.httpRequests) * 100).toFixed(2))
+      : 0,
+    avgBatchDurationMs: metrics.jobsProcessed > 0
+      ? Number((metrics.batchProcessingDurationMsTotal / metrics.jobsProcessed).toFixed(2))
       : 0,
   };
 }
@@ -126,6 +205,16 @@ function resetMetrics() {
   metrics.totalProcessingTimeMs = 0;
   metrics.approvalCounts = {};
   metrics.errors = 0;
+  metrics.httpRequests = 0;
+  metrics.httpErrors = 0;
+  metrics.httpLatencyMsTotal = 0;
+  metrics.httpLatencyCount = 0;
+  metrics.jobsProcessed = 0;
+  metrics.jobsFailed = 0;
+  metrics.jobsRetried = 0;
+  metrics.queueDepth = 0;
+  metrics.workerActiveJobs = 0;
+  metrics.batchProcessingDurationMsTotal = 0;
   metrics.startedAt = new Date().toISOString();
 }
 
@@ -135,6 +224,12 @@ module.exports = {
   recordBatch,
   recordProcessingTime,
   recordError,
+  recordHttpRequest,
+  recordJobCompleted,
+  recordJobFailed,
+  recordJobRetry,
+  setQueueDepth,
+  setWorkerActiveJobs,
   getMetrics,
   resetMetrics,
 };

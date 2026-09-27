@@ -31,7 +31,17 @@ export default function BatchResults({ data }) {
 
   if (!data) return null;
 
-  const { summary, results } = data;
+  // Support both legacy sync shape { summary, results } and async shape { batch, results }.
+  const batch = data.batch || null;
+  const summary = data.summary || (batch
+    ? {
+        total: batch.total,
+        successful: batch.successful,
+        failed: batch.failed,
+        processedAt: batch.completedAt || batch.createdAt,
+      }
+    : { total: 0, successful: 0, failed: 0 });
+  const results = data.results || [];
 
   // Apply filter
   const filteredResults = results.filter((r) => {
@@ -62,6 +72,15 @@ export default function BatchResults({ data }) {
   return (
     <div className="batch-results">
       <h2>Batch Results</h2>
+
+      {batch && (
+        <div className="batch-meta">
+          <p>
+            Batch {batch.batchId} — {batch.status}
+            {typeof batch.progress === 'number' && <> · {batch.progress}%</>}
+          </p>
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div className="batch-summary">

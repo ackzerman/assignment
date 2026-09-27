@@ -22,6 +22,16 @@ export default function RoutingResult({ result }) {
   if (!result) return null;
 
   const deptColor = DEPT_COLORS[result.department] || '#6b7280';
+  // Master shape returns approvals as string array; legacy returns objects.
+  // Prefer detailed objects when present.
+  const approvalsDetail = result.approvalsDetail
+    || (Array.isArray(result.approvals) && result.approvals.length > 0 && typeof result.approvals[0] === 'object'
+      ? result.approvals
+      : []);
+  const approvalNames = Array.isArray(result.approvals)
+    ? result.approvals.map((a) => (typeof a === 'string' ? a : a.type))
+    : [];
+  const needsApproval = result.requiresApproval ?? approvalNames.length > 0;
 
   return (
     <div className="routing-result">
@@ -52,7 +62,7 @@ export default function RoutingResult({ result }) {
       <div className="result-section">
         <div className="result-label">Insurance</div>
         <div className="result-value">
-          {result.requiresApproval ? (
+          {needsApproval ? (
             <span className="approval-badge required">Required</span>
           ) : (
             <span className="approval-badge not-required">Not Required</span>
@@ -61,15 +71,38 @@ export default function RoutingResult({ result }) {
       </div>
 
       {/* Approval Details */}
-      {result.approvals && result.approvals.length > 0 && (
+      {approvalsDetail && approvalsDetail.length > 0 && (
         <div className="result-section">
           <div className="result-label">Approval Details</div>
           <div className="result-value">
             <ul className="approvals-list">
-              {result.approvals.map((approval, index) => (
+              {approvalsDetail.map((approval, index) => (
                 <li key={index}>
                   <strong>{approval.type}:</strong> {approval.reason}
                 </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
+      {/* Master explainability: matched rules + reasons */}
+      {result.matchedRules && result.matchedRules.length > 0 && (
+        <div className="result-section">
+          <div className="result-label">Matched Rules</div>
+          <div className="result-value">
+            <div className="reason-text">{result.matchedRules.join(', ')}</div>
+          </div>
+        </div>
+      )}
+
+      {result.reasons && result.reasons.length > 0 && (
+        <div className="result-section">
+          <div className="result-label">Reasons</div>
+          <div className="result-value">
+            <ul className="approvals-list">
+              {result.reasons.map((reason, index) => (
+                <li key={index} className="reason-text">{reason}</li>
               ))}
             </ul>
           </div>

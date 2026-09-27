@@ -1,214 +1,34 @@
-# Parcel Routing System — Implementation Master Prompt
+# MASTER IMPLEMENTATION PROMPT — Parcel Routing System
 
-You are helping me build the **Parcel Routing System Technical Assessment** described below.
+## ROLE
 
-Your job is to help me implement this project **phase-by-phase**, while staying strictly within the requirements of the assessment. Do not introduce unnecessary features, technologies, abstractions, or scope that are not justified by the requirements.
+You are a senior backend/full-stack engineer implementing and hardening the existing **Parcel Routing System**.
 
-I will implement the project incrementally. **Do not build the entire application at once.** Work on one phase at a time and wait for me to explicitly ask you to continue.
+Your job is to modify the existing repository incrementally and safely.
 
----
+Do **not** rewrite the project from scratch.
 
-# 1. Assessment Context
+Before changing anything, inspect the existing codebase, understand the current architecture, preserve working functionality, and implement each phase independently.
 
-We are building an internal parcel routing system for a parcel delivery company.
+The final system must be:
 
-The system processes parcels and routes them to departments according to business rules.
+* Correct
+* Extensible
+* Testable
+* Secure
+* Reliable
+* Observable
+* Fault-tolerant
+* Explainable
+* Production-oriented without unnecessary over-engineering
 
-The company expects the system to:
-
-* Be adaptable to business changes
-* Be reliable when failures occur
-* Be safe to evolve
-* Provide sufficient visibility when something goes wrong
-* Demonstrate thoughtful engineering beyond basic coding
-
-AI tools are explicitly allowed and expected to be used for at least two parts of the assignment.
-
-The final deliverables are:
-
-* Production-ready application
-* Automated tests
-* Configuration system if used
-* README containing:
-  * Architecture decisions
-  * Trade-offs
-  * AI usage documentation
-  * How to extend the routing system
-* 10–15 minute presentation
+This is an **on-campus/fresher technical assessment**, so prioritize clear engineering decisions and understandable architecture over enterprise-level complexity.
 
 ---
 
-# 2. Core Business Requirements
+# 1. EXISTING BUSINESS REQUIREMENTS
 
-Each parcel contains:
-
-* Weight (kg)
-* Value (€)
-* Destination country
-* Optional additional attributes
-
-Default routing rules:
-
-```text
-Weight <= 1 kg       → Mail Department
-Weight <= 10 kg      → Regular Department
-Weight > 10 kg       → Heavy Department
-
-Value > €1000        → Insurance approval required
-```
-
-The system must:
-
-* Route parcels according to these rules
-* Make business rules adaptable
-* Allow future departments/routing conditions without major refactoring
-* Consider the safety/correctness implications of rule changes
-* Clearly communicate routing decisions
-
----
-
-# 3. UI Requirements
-
-The application must provide a simple interface that allows operators to:
-
-* Enter parcel data
-* Upload batch data
-* View routing outcomes clearly
-
-For batch upload, choose either JSON or XML and justify the decision.
-
-The UI must:
-
-* Be usable by non-technical operators
-* Clearly communicate routing decisions
-* Handle large input files gracefully
-* Be responsive if web-based
-* Prioritize clarity and usability over visual complexity
-
-Do not build unnecessary UI features or elaborate dashboards.
-
----
-
-# 4. Quality Requirements
-
-The application must:
-
-* Have automated tests for routing logic
-* Demonstrate regression protection
-* Demonstrate how a new rule can be introduced safely
-* Include a small example of feature development from branch to merge
-* Explain how correctness is validated beyond automated tests
-
----
-
-# 5. Monitoring & Reliability Requirements
-
-The system must provide sufficient visibility when something goes wrong.
-
-Design for:
-
-* Failure detection
-* Useful logs
-* Error context
-* Investigation/debugging
-* Notification/alerting
-* Detection of unusual routing patterns
-
-Do not build an unnecessarily complex observability platform. Implement only what is appropriate for this assessment.
-
----
-
-# 6. Security Requirements
-
-The application will be exposed to the public internet.
-
-Implement appropriate protection against common threats.
-
-The implementation and documentation should address relevant areas such as:
-
-* Input validation
-* API security
-* Authentication/authorization where applicable
-* Rate limiting
-* File-upload security
-* Secure configuration/secrets
-* Injection protection
-* Resource exhaustion
-* Appropriate HTTP/security protections
-
-Do not add security features merely for the sake of complexity. Explain why each implemented security measure is relevant.
-
----
-
-# 7. Debugging Requirement
-
-During the interview I may be given a buggy routing function.
-
-The system and code should therefore be structured so that I can easily:
-
-1. Understand the routing logic
-2. Identify incorrect behavior
-3. Reproduce the problem
-4. Fix it
-5. Add a regression test
-6. Explain my reasoning
-
-The routing code must remain readable and easy to reason about.
-
----
-
-# 8. AI Usage Requirement
-
-I must use AI for at least two parts of the assignment.
-
-The project must document:
-
-* The prompts used
-* What AI generated
-* What I changed
-* Why I changed it
-* What I accepted
-* What I rejected
-* Limitations of AI
-* How I verified the generated output
-
-AI should assist development, not replace my understanding.
-
-Whenever you generate code for me, explain the important design decisions and make sure I understand the code before moving on.
-
----
-
-# IMPLEMENTATION ROADMAP
-
-Group the work into the following **8 major phases**.
-
-Do not skip ahead unless I explicitly ask.
-
----
-
-# PHASE 1 — Foundation, Domain Model & Validation
-
-## Goal
-
-Establish the basic project structure and define the parcel domain correctly.
-
-## Tasks
-
-### 1. Project foundation
-
-Set up:
-
-* Backend
-* Frontend
-* Project structure
-* Environment configuration
-* Git repository
-* Basic README
-* Basic error-handling structure
-
-### 2. Parcel model
-
-Define the parcel representation:
+A parcel contains:
 
 ```text
 weight
@@ -217,874 +37,1933 @@ destinationCountry
 additionalAttributes
 ```
 
-### 3. Input validation
+## Department routing rules
+
+```text
+weight <= 1 kg       → Mail
+weight <= 10 kg      → Regular
+weight > 10 kg       → Heavy
+```
+
+These department rules are mutually exclusive.
+
+They use:
+
+> **first matching rule wins**
+
+with explicit priority.
+
+## Approval rules
+
+```text
+value > €1000 → Insurance approval required
+```
+
+Approval rules are cumulative.
+
+Multiple approval rules may match the same parcel.
+
+## Routing result
+
+A routing decision should be explainable.
+
+It should contain information such as:
+
+```json
+{
+  "parcelId": "P123",
+  "department": "REGULAR",
+  "approvals": ["INSURANCE"],
+  "matchedRules": [
+    "department.regular",
+    "approval.insurance"
+  ],
+  "reasons": [
+    "Weight is <= 10kg",
+    "Value exceeds €1000"
+  ]
+}
+```
+
+Do not expose unnecessary internal implementation details.
+
+---
+
+# 2. CORE ARCHITECTURE
+
+Use a clean-architecture-lite approach.
+
+The architecture should conceptually remain:
+
+```text
+                         CLIENT
+                           |
+                           v
+                    Express API
+                           |
+             +-------------+-------------+
+             |                           |
+        Single Parcel                  Batch
+             |                           |
+        Validation                 Batch validation
+             |                           |
+        Routing Engine             Create Batch
+             |                           |
+           Rules                       Queue
+                                         |
+                                    Worker Pool
+                                         |
+                                    Validation
+                                         |
+                                    Routing Engine
+                                         |
+                                       Rules
+                                         |
+                                      Database
+                                         |
+                                  Status / Results
+                                         |
+                                      API
+                                         |
+                                    Frontend
+```
+
+## Critical architectural rule
+
+The **queue does NOT contain business logic**.
+
+The queue only represents durable work.
+
+The worker consumes a queue job and invokes:
+
+```text
+validation
+    ↓
+routing engine
+    ↓
+rules
+```
+
+Both single-parcel and batch processing must ultimately use the **same domain routing logic**.
+
+Do not duplicate routing logic for batch processing.
+
+---
+
+# 3. DOMAIN CORE MUST REMAIN FRAMEWORK-INDEPENDENT
+
+The core domain should not depend on:
+
+* Express
+* Redis
+* BullMQ
+* HTTP request/response objects
+* database models
+* frontend code
+
+The conceptual dependency should be:
+
+```text
+Input
+ ↓
+Validation
+ ↓
+Routing Engine
+ ↓
+Rules
+ ↓
+Routing Result
+```
+
+The domain should be deterministic.
+
+Given the same valid parcel:
+
+```text
+same input → same routing result
+```
+
+This is important for:
+
+* testing
+* retries
+* queue processing
+* idempotency
+* debugging
+* explainability
+
+---
+
+# 4. PHASE 0 — BASELINE AUDIT
+
+Before modifying anything:
+
+1. Inspect the entire repository.
+2. Understand:
+
+   * backend structure
+   * frontend structure
+   * domain files
+   * routes
+   * middleware
+   * tests
+   * batch implementation
+   * configuration
+   * package dependencies
+3. Read:
+
+   * `MASTER_PROMPT.md`
+   * `ENGINEERING_DECISIONS.md`
+   * `README`
+4. Run:
+
+   * tests
+   * build
+   * application locally
+5. Record the current state.
+
+Do not change architecture before understanding the existing implementation.
+
+### Verification
+
+After Phase 0 report:
+
+```text
+Current architecture
+Existing functionality
+Existing tests
+Existing risks
+Planned changes
+```
+
+Stop if the baseline does not work.
+
+---
+
+# 5. PHASE 1 — PROTECT THE DOMAIN CORE
+
+Preserve/refactor the domain into clear responsibilities.
+
+Expected conceptual structure:
+
+```text
+domain/
+    parcel.js
+    validation.js
+    rules.js
+    routingEngine.js
+```
+
+Responsibilities:
+
+### `validation.js`
+
+Responsible for:
+
+* validating incoming parcel data
+* normalizing external input
+* accumulating validation errors
+* returning canonical domain representation
+
+Validation should be strict.
+
+Do not rely on permissive parsing such as:
+
+```js
+parseFloat("5abc")
+```
+
+being accepted as `5`.
+
+Reject malformed numeric values.
 
 Validate:
 
-* Required fields
-* Data types
-* Weight
-* Value
-* Country
-* Additional attributes where appropriate
-* Invalid/malformed input
+* required fields
+* types
+* numeric ranges
+* country code
+* additional attributes
+* unexpected/malformed structures
+
+### `rules.js`
+
+Contains the actual routing rules.
+
+Rules should be declarative wherever practical.
+
+Example conceptual structure:
+
+```text
+id
+type
+priority
+condition
+result
+reason
+```
+
+### `routingEngine.js`
+
+Responsible for:
+
+* evaluating rules
+* applying department-rule priority
+* applying approval rules cumulatively
+* generating explainable routing decisions
+* failing closed when no department rule matches
+
+The routing engine decides **how rules are evaluated**.
+
+Rules define **what the business rules are**.
+
+Do not mix these responsibilities.
+
+---
+
+# 6. RULE SEMANTICS
+
+Explicitly preserve these semantics.
+
+## Department rules
+
+Mutually exclusive:
+
+```text
+first matching rule wins
+```
+
+Use explicit priority.
+
+Do not depend accidentally on array order without documenting the behavior.
+
+## Approval rules
+
+Cumulative:
+
+```text
+all matching approval rules apply
+```
+
+Example:
+
+```text
+value > 1000 → insurance
+value > 5000 → manager approval
+```
+
+A €6000 parcel should receive both approvals.
+
+## Explainability
+
+Every routing result should be able to explain:
+
+```text
+which rule matched
+why it matched
+what decision it caused
+```
+
+This should be represented through stable rule IDs/reasons.
+
+---
+
+# 7. PHASE 2 — VALIDATION + API BOUNDARY
+
+The API layer must remain an adapter.
+
+Conceptually:
+
+```text
+HTTP request
+     ↓
+extract input
+     ↓
+validate
+     ↓
+call domain service
+     ↓
+serialize result
+     ↓
+HTTP response
+```
+
+Routes must NOT contain business routing logic.
+
+They should not independently evaluate weight/value rules.
+
+## Error handling
+
+Distinguish:
+
+### Expected errors
+
+Examples:
+
+* invalid parcel
+* missing field
+* invalid country
+* invalid batch
+
+These should produce appropriate client errors.
+
+### Unexpected errors
+
+Examples:
+
+* database failure
+* Redis failure
+* programming error
+
+These should go through centralized error handling.
+
+Never expose:
+
+* stack traces
+* internal database details
+* secrets
+* implementation internals
+
+---
+
+# 8. PHASE 3 — SINGLE PARCEL PROCESSING
+
+Single parcel processing should remain **synchronous** unless there is a specific business requirement for asynchronous processing.
+
+Flow:
+
+```text
+POST /api/parcels
+      ↓
+Validation
+      ↓
+Routing Engine
+      ↓
+Rules
+      ↓
+Immediate response
+```
+
+Example:
+
+```http
+POST /api/parcels
+```
+
+returns:
+
+```http
+200 OK
+```
+
+with the routing result.
+
+Do NOT unnecessarily send single parcels through the queue.
+
+### Why?
+
+Because routing is computationally cheap and the caller expects an immediate answer.
+
+A queue would add:
+
+* latency
+* infrastructure
+* complexity
+* asynchronous API semantics
+
+without solving an actual requirement.
+
+---
+
+# 9. PHASE 4 — BATCH PROCESSING ARCHITECTURE
+
+Batch processing is asynchronous.
+
+Do NOT make the HTTP request itself process a huge batch synchronously.
+
+Instead:
+
+```text
+POST /api/batches
+       ↓
+Validate batch envelope
+       ↓
+Create batch record
+       ↓
+Queue batch job
+       ↓
+Return 202
+```
+
+Response:
+
+```json
+{
+  "batchId": "B123",
+  "status": "QUEUED"
+}
+```
+
+Use:
+
+```http
+202 Accepted
+```
+
+because processing has not completed yet.
+
+---
+
+# 10. QUEUE DESIGN
+
+Use a durable queue such as:
+
+```text
+BullMQ + Redis
+```
+
+unless the repository already has an appropriate queue infrastructure.
+
+Do not introduce Kafka or other heavyweight distributed infrastructure unless the requirements genuinely justify it.
+
+## Important
+
+The queue payload should NOT contain an unnecessarily huge batch.
+
+Prefer:
+
+```json
+{
+  "batchId": "B123"
+}
+```
+
+The worker can retrieve the batch data from the persistent store.
+
+This keeps queue messages small and allows durable recovery.
+
+---
+
+# 11. WORKER DESIGN
+
+The worker consumes a batch job.
+
+Conceptually:
+
+```text
+Queue
+  ↓
+Worker
+  ↓
+Load batch
+  ↓
+Process parcels
+  ↓
+Validate parcel
+  ↓
+Routing Engine
+  ↓
+Persist result
+  ↓
+Update progress
+```
+
+The worker must use the **same validation and routing engine** as synchronous processing.
+
+Do not create:
+
+```text
+singleParcelRouting()
+batchRouting()
+```
+
+with duplicated business rules.
+
+Instead:
+
+```text
+single API ───────┐
+                  ├──> validation → routing engine → rules
+batch worker ─────┘
+```
+
+---
+
+# 12. BATCH CHUNKING
+
+Initially, use:
+
+```text
+1 queue job = 1 batch
+```
+
+and process the batch internally in chunks.
+
+For example:
+
+```text
+Batch: 100,000 parcels
+
+Worker
+ ├── chunk 1
+ ├── chunk 2
+ ├── chunk 3
+ ├── ...
+```
+
+Yield to the Node.js event loop where appropriate.
+
+Remember:
+
+> `setImmediate()` prevents monopolizing the event loop; it does NOT create parallelism.
+
+If future scale requires it, the architecture can evolve toward:
+
+```text
+batch
+ ↓
+chunk jobs
+ ↓
+worker pool
+```
+
+but do not introduce this complexity prematurely.
+
+---
+
+# 13. PHASE 5 — PERSISTENT BATCH STATE
+
+A database is required for the asynchronous batch workflow because the system needs durable application state.
+
+The database answers:
+
+> **What happened?**
+
+The queue answers:
+
+> **What work needs to happen?**
+
+Do not confuse their responsibilities.
+
+## Persist batch state
+
+Example:
+
+```text
+QUEUED
+PROCESSING
+COMPLETED
+COMPLETED_WITH_ERRORS
+FAILED
+```
+
+Store:
+
+```text
+batchId
+status
+total
+processed
+successful
+failed
+createdAt
+startedAt
+completedAt
+error information
+```
+
+Potentially:
+
+```text
+progress percentage
+```
+
+can be derived from:
+
+```text
+processed / total
+```
+
+rather than unnecessarily storing redundant values.
+
+---
+
+# 14. PARCEL RESULT PERSISTENCE
+
+Persist the routing result.
+
+For example:
+
+```text
+batchId
+parcelId
+department
+approvals
+matchedRules
+reasons
+status
+createdAt
+```
+
+This provides:
+
+* durable results
+* status retrieval
+* explainability
+* auditability
+* idempotency
+* recovery after worker crashes
+
+Explainability is **one reason** to persist results, not the only reason.
+
+---
+
+# 15. REAL-TIME PROGRESS
+
+The user SHOULD be able to see batch progress.
+
+The queue itself is not exposed to the user.
+
+The flow should be:
+
+```text
+Worker
+  ↓
+updates progress
+  ↓
+Database
+  ↓
+API
+  ↓
+Frontend
+```
+
+Expose:
+
+```http
+GET /api/batches/:batchId
+```
+
+Example:
+
+```json
+{
+  "batchId": "B123",
+  "status": "PROCESSING",
+  "total": 10000,
+  "processed": 3200,
+  "successful": 3150,
+  "failed": 50,
+  "progress": 32
+}
+```
+
+Frontend can display:
+
+```text
+Processing batch B123
+
+████████░░░░░░░░░░░░ 32%
+
+3,200 / 10,000 processed
+3,150 successful
+50 failed
+```
+
+## Initial implementation
+
+Use **polling**.
+
+For example:
+
+```text
+Frontend
+   ↓
+GET /api/batches/B123
+   ↓
+wait
+   ↓
+GET /api/batches/B123
+   ↓
+...
+```
+
+This is sufficient for the assessment.
+
+Do not introduce WebSockets/SSE unless required.
+
+## Optional future enhancement
+
+The architecture should allow:
+
+```text
+Worker → WebSocket/SSE → Frontend
+```
+
+for push-based updates.
+
+---
+
+# 16. BATCH RESULTS API
+
+After completion:
+
+```http
+GET /api/batches/:batchId/results
+```
+
+should return persisted routing results.
+
+Example:
+
+```json
+{
+  "batchId": "B123",
+  "status": "COMPLETED_WITH_ERRORS",
+  "results": [
+    {
+      "parcelId": "P1",
+      "department": "MAIL",
+      "approvals": [],
+      "matchedRules": ["department.mail"],
+      "reasons": ["Weight is <= 1kg"]
+    }
+  ]
+}
+```
+
+Do not force the client to keep the original request payload in memory.
+
+The database is the durable source of truth for asynchronous results.
+
+---
+
+# 17. PHASE 6 — IDEMPOTENCY + DUPLICATE PROCESSING
+
+Assume the queue provides **at-least-once delivery**.
+
+Therefore:
+
+```text
+same job may execute more than once
+```
+
+This is normal.
+
+Do not assume:
+
+```text
+one queue message = exactly one execution
+```
+
+## Important distinction
+
+Idempotency prevents:
+
+> duplicate final state
+
+It does NOT necessarily prevent:
+
+> duplicate computation
+
+Example:
+
+```text
+Worker 1 processes P123
+Worker 1 writes result
+Worker crashes before ACK
+
+Queue retries job
+
+Worker 2 processes P123 again
+```
+
+The routing computation may happen twice.
+
+That is acceptable if the final persisted result remains correct.
+
+---
+
+# 18. STABLE PARCEL IDENTITY
+
+Every parcel in a batch must have a stable identity.
+
+Prefer:
+
+```text
+batchId + parcelId
+```
+
+Do NOT use the parcel content itself as the unique identity.
+
+Why?
+
+Two legitimate parcels can have:
+
+```text
+same weight
+same value
+same country
+same attributes
+```
+
+but still be different parcels.
+
+---
+
+# 19. DATABASE-LEVEL DUPLICATE PROTECTION
+
+Persist results with a unique constraint such as:
+
+```text
+UNIQUE(batchId, parcelId)
+```
+
+This is the authoritative protection against duplicate final records.
+
+The architecture becomes:
+
+```text
+At-least-once queue
+        ↓
+Possible duplicate execution
+        ↓
+Idempotent worker
+        ↓
+Stable parcel identity
+        ↓
+DB unique constraint
+        ↓
+Correct final state
+```
+
+Queue-level job IDs can reduce accidental duplicate jobs, but they are NOT sufficient as the only idempotency mechanism.
+
+The database must protect the final state.
+
+---
+
+# 20. PARTIAL FAILURE
+
+A single invalid parcel should not necessarily destroy the entire batch.
+
+Example:
+
+```text
+10,000 parcels
+9,950 valid
+50 invalid
+```
+
+The worker should process valid parcels and record invalid ones.
+
+Final state:
+
+```text
+COMPLETED_WITH_ERRORS
+```
+
+Store enough information for the user to understand what failed.
+
+Do not silently discard failed parcels.
+
+---
+
+# 21. RETRIES
+
+Retry only failures that are likely to be transient.
 
 Examples:
 
 ```text
-weight = -5       → reject
-weight = "hello"  → reject
-value = "abc"     → reject
-missing country   → reject
+Redis temporary failure
+database connection interruption
+temporary network failure
 ```
 
-## Important
+Do not blindly retry:
 
-Do not implement the complete UI, batch system, monitoring, or security infrastructure yet.
+```text
+invalid parcel
+invalid schema
+business-rule rejection
+```
 
-At the end of this phase I should have a clean foundation and valid parcel data entering the system.
+Use:
+
+```text
+exponential backoff
++
+jitter
++
+maximum retry count
+```
+
+After retries are exhausted, transition the appropriate job/batch into a failed/dead-letter state.
 
 ---
 
-# PHASE 2 — Core Routing Engine & Extensible Rules
+# 22. DEAD-LETTER / FAILED JOB HANDLING
 
-## Goal
+Implement a clear failure path.
 
-Implement the core business logic and design it so business rules can evolve safely.
+Conceptually:
 
-## Tasks
+```text
+Queue
+ ↓
+Worker
+ ↓
+failure
+ ↓
+retry
+ ↓
+retry
+ ↓
+max attempts reached
+ ↓
+failed/dead-letter state
+```
+
+The system should make failed jobs diagnosable.
+
+Do not silently lose jobs.
+
+---
+
+# 23. PHASE 7 — RELIABILITY
 
 Implement:
 
-```text
-Weight <= 1kg   → Mail
-Weight <= 10kg  → Regular
-Weight > 10kg   → Heavy
+### Timeouts
 
-Value > €1000   → Insurance approval
-```
+Do not allow external/dependency calls to hang forever.
 
-The routing result should contain enough information to explain the decision.
+### Graceful shutdown
 
-For example:
+On shutdown:
 
 ```text
-Department: Heavy
-
-Reason:
-Parcel weight is greater than 10kg.
-
-Insurance:
-Required
-
-Reason:
-Parcel value exceeds €1000.
+stop accepting new work
+ ↓
+finish/stop current processing safely
+ ↓
+close queue connections
+ ↓
+close database connections
+ ↓
+exit
 ```
 
-## Extensibility
+### Health endpoints
 
-Design a clean mechanism for adding future:
+Separate:
 
-* Departments
-* Conditions
-* Routing rules
-* Approval requirements
+```text
+liveness
+readiness
+```
 
-without major refactoring.
+Conceptually:
 
-Possible approaches may include:
+```text
+/live
+```
 
-* Rule abstraction
-* Strategy pattern
-* Chain of Responsibility
-* Configuration-driven rules
+answers:
 
-Do not blindly implement a design pattern.
+> Is the process alive?
 
-Choose the simplest architecture that satisfies the requirements and explain:
+```text
+/ready
+```
 
-* Why it was selected
-* Alternatives considered
-* Trade-offs
-* How a new rule would be added
+answers:
 
-## Rule conflicts
+> Can this instance safely receive work?
 
-Think about what happens if multiple future rules match the same parcel.
-
-The design must have a clear and explainable approach to:
-
-* Rule precedence
-* Multiple applicable rules
-* Routing decision
-* Approval requirements
-
-## Configuration safety
-
-If rules are configurable, consider:
-
-* Validation
-* Invalid configurations
-* Overlapping rules
-* Missing ranges
-* Safe rollout
-* Rule/version identification
-
-Do not create an unnecessarily complex configuration management system.
+Readiness should account for critical dependencies where appropriate.
 
 ---
 
-# PHASE 3 — Single Parcel UI & Routing API
+# 24. FAULT-TOLERANCE MODEL
 
-## Goal
+Do not claim that the system can never fail.
 
-Provide the operator-facing functionality for processing one parcel.
+Instead, explicitly design for failure.
 
-## Tasks
+### Batch
 
-Create a simple interface containing:
+Durable queue + persistent DB means:
 
 ```text
-Weight
-Value
-Destination Country
-Additional Attributes
-
-[ Route Parcel ]
+API crashes
+    ↓
+batch already persisted
+    ↓
+queue job remains
+    ↓
+worker can continue/retry
 ```
 
-Display results clearly.
+### Single request
+
+Single parcel processing is synchronous.
+
+Therefore, if the server dies before completing the request:
+
+```text
+request may fail
+```
+
+This is acceptable unless the business requires guaranteed eventual processing.
+
+If guaranteed eventual processing for single parcels becomes a requirement, then single parcel can also become asynchronous:
+
+```text
+POST
+ ↓
+202
+ ↓
+job ID
+ ↓
+queue
+ ↓
+worker
+```
+
+But that changes the API semantics and should only be done when justified.
+
+---
+
+# 25. PHASE 8 — SECURITY
+
+Implement security at boundaries.
+
+## Validation
+
+Never trust frontend validation.
+
+Backend validation is authoritative.
+
+## Input sanitization
+
+Protect against injection attacks.
+
+Do not confuse:
+
+```text
+sanitization
+```
+
+with:
+
+```text
+validation
+```
+
+Validation answers:
+
+> Is this allowed?
+
+Sanitization answers:
+
+> Can this input be safely represented/processed?
+
+## Body size limits
+
+Prevent excessively large requests.
+
+## Batch limits
+
+Define sensible limits for:
+
+* number of parcels
+* request size
+* processing size
+
+## Rate limiting
+
+Protect API endpoints from abuse.
+
+## CORS
+
+Understand that CORS is a browser security mechanism.
+
+It is NOT authentication.
+
+## Helmet
+
+Use secure HTTP headers.
+
+## Authentication
+
+If authentication is introduced, verify identity before accessing resources.
+
+## Authorization
+
+A valid user must not automatically be allowed to access every batch.
+
+For:
+
+```http
+GET /api/batches/B123
+```
+
+verify the user owns or is authorized to access `B123`.
+
+Prevent object-level authorization issues.
+
+## Secrets
+
+Never commit:
+
+* Redis credentials
+* database credentials
+* API keys
+* JWT secrets
+
+Use environment variables/secrets management.
+
+---
+
+# 26. PHASE 9 — OBSERVABILITY
+
+Implement structured logging.
+
+Every important operation should be traceable.
+
+Useful IDs:
+
+```text
+requestId
+batchId
+parcelId
+jobId
+workerId
+```
+
+Example conceptual log:
+
+```json
+{
+  "event": "parcel_routed",
+  "requestId": "R123",
+  "batchId": "B123",
+  "parcelId": "P42",
+  "department": "REGULAR"
+}
+```
+
+Avoid logging:
+
+* secrets
+* sensitive data
+* unnecessary full request bodies
+
+---
+
+# 27. METRICS
+
+Track meaningful operational metrics.
+
+Examples:
+
+```text
+HTTP request count
+HTTP error count
+request latency
+batch processing duration
+queue depth
+jobs processed
+jobs failed
+jobs retried
+validation failures
+worker utilization
+```
+
+The goal is to answer:
+
+```text
+Is the system healthy?
+Is work accumulating?
+Are failures increasing?
+Are workers keeping up?
+```
+
+---
+
+# 28. BACKPRESSURE
+
+Understand:
+
+```text
+incoming batch rate
+        vs
+worker processing rate
+```
+
+If:
+
+```text
+incoming > processing
+```
+
+queue depth increases.
+
+The system should have limits and monitoring rather than accepting unlimited work.
+
+Do not implement arbitrary infinite queues.
+
+---
+
+# 29. PHASE 10 — TESTING
+
+Use multiple testing layers.
+
+## Unit tests
+
+Majority of domain tests should be here.
+
+Test:
+
+* validation
+* individual rules
+* routing engine
+* department priority
+* cumulative approvals
+* boundary values
+* explainability
+* fail-closed behavior
+
+Important boundaries:
+
+```text
+1kg
+1.000...kg
+10kg
+10.000...kg
+€1000
+€1000.01
+```
+
+## Integration tests
+
+Test:
+
+```text
+API
+ ↓
+domain
+ ↓
+database/queue boundaries
+```
+
+Use Supertest where appropriate.
+
+## Batch tests
+
+Test:
+
+* batch creation
+* queueing
+* worker execution
+* progress updates
+* partial failures
+* retries
+* duplicate processing
+* idempotency
+* final state
+
+## Regression tests
+
+Every new rule must trigger tests for:
+
+* the new rule
+* existing rules
+* boundary cases
+* priority interactions
+* approval interactions
+
+---
+
+# 30. RULE EVOLUTION
+
+Adding a new rule should be safe.
+
+Process:
+
+```text
+Add rule
+ ↓
+Assign stable ID
+ ↓
+Define priority/semantics
+ ↓
+Add unit tests
+ ↓
+Add interaction tests
+ ↓
+Run complete regression suite
+ ↓
+Review behavior
+```
+
+Never modify rules without testing the effect on existing routing behavior.
+
+---
+
+# 31. PHASE 11 — FRONTEND
+
+Frontend responsibilities:
+
+### Single parcel
+
+```text
+form
+ ↓
+POST /api/parcels
+ ↓
+immediate routing result
+```
+
+Display:
+
+* department
+* approvals
+* reasons
+* matched rules where appropriate
+
+### Batch
+
+```text
+upload/input batch
+ ↓
+POST /api/batches
+ ↓
+receive batchId
+ ↓
+show queued
+ ↓
+poll status
+ ↓
+show progress
+ ↓
+show completed/errors
+ ↓
+fetch results
+```
+
+Example UI:
+
+```text
+Batch B123
+
+Status: Processing
+
+████████████░░░░░░░░ 62%
+
+6,200 / 10,000 processed
+
+Successful: 6,100
+Failed:       100
+```
+
+When complete:
+
+```text
+COMPLETED
+```
+
+or:
+
+```text
+COMPLETED_WITH_ERRORS
+```
+
+Do not expose queue implementation details to the user.
+
+The user should think in terms of:
+
+```text
+batch
+progress
+results
+errors
+```
+
+not:
+
+```text
+Redis
+BullMQ
+worker
+job acknowledgment
+```
+
+---
+
+# 32. API CONTRACTS
+
+Document clear API contracts.
+
+Expected conceptual endpoints:
+
+```text
+POST   /api/parcels
+POST   /api/batches
+GET    /api/batches/:batchId
+GET    /api/batches/:batchId/results
+GET    /health/live
+GET    /health/ready
+```
+
+Batch creation:
+
+```text
+202 Accepted
+```
+
+Single parcel:
+
+```text
+200 OK
+```
+
+Use consistent error responses.
+
+---
+
+# 33. DATABASE RESPONSIBILITIES
+
+The database is responsible for durable application state.
+
+It should support:
+
+```text
+batch status
+batch progress
+parcel identity
+routing results
+idempotency
+explainability
+auditability
+```
+
+The database is NOT being introduced simply because:
+
+> "async systems require databases."
+
+That is incorrect.
+
+The correct reasoning is:
+
+```text
+Queue → durable work
+
+Database → durable business/application state
+```
+
+A queue-only architecture can exist if there is no requirement to persist state/results.
+
+This system does require persistent batch state/results, so a database is justified.
+
+---
+
+# 34. QUEUE VS DATABASE — MENTAL MODEL
+
+Always preserve this distinction:
+
+```text
+QUEUE
+
+"What work needs to happen?"
+
+        vs
+
+DATABASE
+
+"What happened / what is the current state?"
+```
 
 Example:
 
 ```text
-Department: Regular
+Queue:
+Process Batch B123
 
-Insurance: Not Required
-
-Reason:
-Parcel weight is between 1kg and 10kg.
+Database:
+B123
+10,000 total
+6,200 processed
+6,100 successful
+100 failed
+status = PROCESSING
 ```
-
-Also implement the necessary backend API.
-
-## UI principles
-
-The UI must be:
-
-* Simple
-* Clear
-* Usable by non-technical operators
-* Responsive
-* Focused on the routing task
-
-Do not add unnecessary dashboards, animations, user-management screens, or other features that aren't required.
 
 ---
 
-# PHASE 4 — Batch Processing & Large File Handling
+# 35. COMPLETE REQUEST FLOWS
 
-## Goal
-
-Allow operators to upload parcel data in bulk while handling large inputs responsibly.
-
-## Tasks
-
-Choose JSON or XML.
-
-Prefer the format that provides the simplest appropriate solution and document the reasoning.
-
-Implement:
+## Single parcel
 
 ```text
-Upload
+Client
+  ↓
+POST /api/parcels
+  ↓
+Validation
+  ↓
+Routing Engine
+  ↓
+Rules
+  ↓
+Result
+  ↓
+200 OK
+  ↓
+Client
+```
+
+## Batch
+
+```text
+Client
+  ↓
+POST /api/batches
+  ↓
+Validate batch
+  ↓
+Create B123 in DB
+  ↓
+Queue { batchId: B123 }
+  ↓
+202 Accepted
+  ↓
+Client receives B123
+```
+
+Then:
+
+```text
+Queue
+  ↓
+Worker
+  ↓
+Load batch
+  ↓
+Process parcel
   ↓
 Validate
   ↓
-Process
+Routing Engine
   ↓
-Route
+Rules
   ↓
-Display results
-```
-
-The system should handle mixed-validity batches.
-
-For example:
-
-```text
-Parcel 1 → Routed
-Parcel 2 → Invalid weight
-Parcel 3 → Routed
-Parcel 4 → Invalid value
-```
-
-Do not allow one invalid record to make the entire batch result unusable unless there is a strong business reason.
-
-## Large files
-
-Design batch processing so large files do not unnecessarily consume excessive memory.
-
-Where appropriate use:
-
-* Streaming
-* Chunking
-* Bounded processing
-* Progress reporting
-
-The UI should clearly communicate batch progress/results.
-
-Example:
-
-```text
-Processing...
-
-65,000 / 100,000
-
-Successful: 64,850
-Failed: 150
-```
-
-Do not build a distributed job-processing platform unless the requirements actually justify it.
-
----
-
-# PHASE 5 — Testing, Safe Rule Changes & Git Workflow
-
-## Goal
-
-Demonstrate strong engineering discipline around business correctness.
-
-## Automated tests
-
-Create tests for:
-
-### Normal cases
-
-```text
-0.5kg → Mail
-5kg   → Regular
-15kg  → Heavy
-```
-
-### Boundary cases
-
-```text
-1kg       → Mail
-just above 1kg → Regular
-
-10kg      → Regular
-just above 10kg → Heavy
-
-€1000     → No insurance
-just above €1000 → Insurance
-```
-
-### Combined cases
-
-```text
-15kg + €2000
-→ Heavy + Insurance
-```
-
-### Invalid inputs
-
-Test relevant invalid inputs.
-
-## Regression protection
-
-Tests should make it difficult for future rule changes to accidentally break existing behavior.
-
-## New rule demonstration
-
-Introduce one realistic new rule, for example:
-
-```text
-Value > €5000 → Manual Review
-```
-
-Demonstrate:
-
-```text
-Create feature branch
-        ↓
-Implement rule
-        ↓
-Add tests
-        ↓
-Run complete test suite
-        ↓
-Review
-        ↓
-Merge
-```
-
-Test its boundaries:
-
-```text
-€4999 → no review
-€5000 → no review
-€5001 → manual review
-```
-
-## Git workflow
-
-Show a small realistic feature-development example:
-
-```text
-main
+Persist result
   ↓
-feature/manual-review-rule
-  ↓
-implementation + tests
-  ↓
-review
-  ↓
-merge
+Update batch progress
 ```
 
-Keep this realistic rather than creating unnecessary Git process complexity.
-
----
-
-# PHASE 6 — Security
-
-## Goal
-
-Secure the public-facing application against relevant common threats.
-
-Implement appropriate protections for:
-
-### Input
-
-* Server-side validation
-* Malformed input
-* Injection attacks
-
-### APIs
-
-* Appropriate authentication/authorization where required
-* Rate limiting
-* Secure error responses
-
-### File uploads
-
-* Allowed file types
-* File-size limits
-* Content validation
-* Malformed/malicious file handling
-* Resource-exhaustion protection
-
-### Application
-
-* HTTPS in deployment
-* Secure secrets/configuration
-* Appropriate security headers
-* Correct CORS configuration where applicable
-* Dependency/security considerations
-
-## Important
-
-For every security measure, be able to explain:
+Meanwhile:
 
 ```text
-Threat
-  ↓
-Protection
-  ↓
-Why it matters
+Frontend
+   ↓
+GET /api/batches/B123
+   ↓
+DB
+   ↓
+progress
 ```
 
-Do not add security mechanisms without understanding them.
-
----
-
-# PHASE 7 — Reliability, Monitoring & Observability
-
-## Goal
-
-Make the system diagnosable and reliable when things go wrong.
-
-## Failure handling
-
-Consider:
-
-* Invalid parcel
-* Invalid batch
-* Routing failure
-* Database/persistence failure if applicable
-* Unexpected application errors
-* Partial batch failures
-
-The system should distinguish between:
-
-### User-facing information
-
-Example:
+Eventually:
 
 ```text
-Unable to process this batch.
-
-980 parcels processed successfully.
-20 parcels require correction.
-
-Batch ID: BATCH-1234
+status = COMPLETED
 ```
 
-and:
-
-### Internal technical information
-
-Detailed logs should contain enough information for developers to investigate.
-
-## Logging
-
-Where appropriate capture:
+or:
 
 ```text
-timestamp
-request/batch ID
-parcel ID
-operation
-routing result
-rule/version
-error information
+status = COMPLETED_WITH_ERRORS
 ```
 
-Avoid unnecessary sensitive data.
-
-## Metrics
-
-Track relevant information such as:
+Then:
 
 ```text
-Parcels processed
-Routing outcomes
-Failed parcels
-Batch failures
-Processing time
-Errors
+GET /api/batches/B123/results
 ```
 
-## Unusual routing patterns
+---
 
-The system should make it possible to identify suspicious/unexpected routing behavior.
+# 36. PHASE 12 — FINAL ENGINEERING REVIEW
 
-For example:
+Before declaring the project complete, verify:
+
+### Architecture
+
+* [ ] Domain is framework-independent
+* [ ] Same routing engine used everywhere
+* [ ] Queue contains no business logic
+* [ ] Worker owns asynchronous execution
+* [ ] Single parcel remains synchronous
+* [ ] Batch is asynchronous
+* [ ] Database owns durable state
+* [ ] Queue owns durable work
+
+### Correctness
+
+* [ ] Routing rules correct
+* [ ] Department priority correct
+* [ ] Approval rules cumulative
+* [ ] Boundary cases tested
+* [ ] Fail-closed behavior implemented
+* [ ] Explainability preserved
+
+### Batch
+
+* [ ] 202 response
+* [ ] batchId
+* [ ] persistent batch state
+* [ ] worker
+* [ ] queue
+* [ ] progress
+* [ ] partial failures
+* [ ] result retrieval
+* [ ] idempotency
+* [ ] duplicate protection
+
+### Reliability
+
+* [ ] retries
+* [ ] exponential backoff
+* [ ] retry limits
+* [ ] failed/dead-letter handling
+* [ ] graceful shutdown
+* [ ] health checks
+* [ ] readiness checks
+* [ ] timeouts
+
+### Security
+
+* [ ] strict validation
+* [ ] body limits
+* [ ] batch limits
+* [ ] rate limiting
+* [ ] Helmet
+* [ ] CORS correctly configured
+* [ ] authentication where required
+* [ ] authorization/object ownership
+* [ ] secrets protected
+* [ ] safe error responses
+
+### Observability
+
+* [ ] structured logs
+* [ ] request IDs
+* [ ] batch IDs
+* [ ] job IDs
+* [ ] worker IDs
+* [ ] useful metrics
+* [ ] queue depth monitoring
+
+### Testing
+
+* [ ] unit tests
+* [ ] integration tests
+* [ ] API tests
+* [ ] worker tests
+* [ ] idempotency tests
+* [ ] retry tests
+* [ ] regression tests
+* [ ] failure-path tests
+
+---
+
+# 37. IMPLEMENTATION DISCIPLINE
+
+Implement the project **phase by phase**.
+
+After every phase:
+
+1. Run tests.
+2. Run build.
+3. Start the application if appropriate.
+4. Perform relevant manual verification.
+5. Inspect `git diff`.
+6. Check for accidental changes.
+7. Explain what changed.
+8. Explain why it changed.
+9. Identify remaining risks.
+10. Only then continue.
+
+If a phase breaks existing functionality:
+
+> STOP and fix it before proceeding.
+
+Do not silently continue with a broken baseline.
+
+---
+
+# 38. DO NOT OVER-ENGINEER
+
+This project is intended for an assessment.
+
+Prefer:
 
 ```text
-Normal:
-Mail       30%
-Regular    60%
-Heavy      10%
-
-Unexpected:
-Mail        0%
-Regular     2%
-Heavy      98%
+simple + correct + explainable
 ```
 
-The goal is visibility, not building a sophisticated ML anomaly-detection system.
-
-## Alerts
-
-Define reasonable conditions under which the engineering team should be notified.
-
-Keep the implementation proportional to the assessment.
-
----
-
-# PHASE 8 — Validation, AI Documentation, README & Presentation
-
-## Goal
-
-Finish the project and prepare it for the assessment interview.
-
-### 1. Validation beyond automated tests
-
-Document and demonstrate:
-
-* Manual functional testing
-* Boundary testing
-* Batch testing
-* Invalid input testing
-* Failure testing
-* Rule-change validation
-* End-to-end testing
-
-Explain how these complement automated tests.
-
----
-
-## 2. AI usage documentation
-
-Document at least two meaningful uses of AI.
-
-For each:
+over:
 
 ```text
-Purpose
-↓
-Prompt
-↓
-AI output
-↓
-What I changed
-↓
-Why I changed it
-↓
-How I verified it
-↓
-Limitations
+complex + theoretically scalable + difficult to explain
 ```
 
-I must be able to explain the generated code during the interview.
+Do NOT introduce unnecessary:
 
----
+* microservices
+* Kafka
+* Kubernetes
+* distributed tracing infrastructure
+* event sourcing
+* CQRS
+* complex caching
+* multiple databases
 
-## 3. README
+unless a concrete requirement justifies them.
 
-The README must contain:
+A strong implementation for this project is:
 
 ```text
-Project Overview
+React
+   ↓
+Express
+   ↓
+Domain Core
+   ↓
+Database
 
-Architecture
-
-Architecture Decisions
-
-Trade-offs
-
-Routing Rules
-
-How Routing Rules Can Be Extended
-
-Testing Strategy
-
-Safe Rule Changes
-
-Security
-
-Reliability
-
-Monitoring / Observability
-
-Configuration Safety
-
-AI Usage
-
-How to Run
-
-How to Test
+Batch:
+Express
+   ↓
+Queue
+   ↓
+Worker
+   ↓
+Domain Core
+   ↓
+Database
 ```
-
-Keep the README directly aligned with the assessment.
 
 ---
 
-## 4. 10–15 minute presentation
+# 39. INTERVIEW-ORIENTED IMPLEMENTATION
 
-Prepare a concise presentation covering:
+While implementing, maintain a short engineering explanation for every major decision.
+
+For each important component, be able to answer:
+
+### Why?
+
+Why does this component exist?
+
+### Why here?
+
+Why does this logic belong in this layer?
+
+### Why not another approach?
+
+What alternative was considered?
+
+### Failure?
+
+What happens if it fails?
+
+### Scale?
+
+What happens when load increases?
+
+### Consistency?
+
+What prevents incorrect or duplicate state?
+
+### Testing?
+
+How do we prove it works?
+
+### Tradeoff?
+
+What complexity did we deliberately avoid?
+
+The final implementation should allow the candidate to explain the architecture confidently in a **10–15 minute presentation**.
+
+---
+
+# 40. FINAL PRESENTATION STORY
+
+The final presentation should be explainable as:
 
 ```text
-1. Problem & Requirements
-2. Architecture
-3. Single Parcel Demo
-4. Batch Processing
-5. Routing Rule Extensibility
-6. Testing & Safe Rule Change
-7. Security
-8. Reliability & Monitoring
-9. AI-Assisted Development
-10. Trade-offs
+1. Problem
+   ↓
+2. Domain model
+   ↓
+3. Rule engine
+   ↓
+4. Synchronous single-parcel processing
+   ↓
+5. Why batches need asynchronous processing
+   ↓
+6. Queue + worker architecture
+   ↓
+7. Database for durable state/results
+   ↓
+8. Idempotency and duplicate handling
+   ↓
+9. Progress tracking
+   ↓
+10. Security
+   ↓
+11. Reliability
+   ↓
+12. Observability
+   ↓
+13. Testing
+   ↓
+14. Tradeoffs and future improvements
 ```
 
-The presentation should demonstrate engineering judgment rather than simply showing screenshots.
+The key architectural sentence to remember is:
+
+> **Single parcels are processed synchronously through the shared domain core, while batches are durably queued and processed asynchronously by workers using that exact same domain core. The queue manages work, the database manages durable state and results, and the API exposes progress and results to the frontend.**
 
 ---
 
-# DEVELOPMENT RULES
+## IMPLEMENTATION ORDER
 
-These rules apply throughout the entire project.
-
-## Rule 1 — Implement phase-by-phase
-
-Do NOT implement future phases prematurely.
-
-When I say:
-
-> "Start Phase 1"
-
-only work on Phase 1.
-
-When Phase 1 is complete, summarize:
-
-* What was implemented
-* Important files
-* Important design decisions
-* How to test it
-* Any trade-offs
-* What remains for the next phase
-
-Then wait for me.
-
----
-
-## Rule 2 — Stay within the assessment
-
-Do not introduce unrelated features such as:
-
-* Payment systems
-* Notifications unrelated to failures
-* Complex user profiles
-* Analytics unrelated to routing/monitoring
-* Recommendation systems
-* AI routing
-* Microservices purely for complexity
-* Kubernetes unless actually justified
-* Event-driven architecture purely for demonstration
-* Distributed systems unnecessarily
-* Complex dashboards
-* Unrequested business features
-
-Every significant implementation decision should be traceable to an assessment requirement.
-
----
-
-## Rule 3 — Prefer simplicity
-
-This is an interview assessment, not a production system serving millions of parcels.
-
-Choose the simplest architecture that satisfies:
-
-* Correctness
-* Extensibility
-* Reliability
-* Security
-* Testability
-* Observability
-
-Do not over-engineer.
-
----
-
-## Rule 4 — Explain before implementing important architecture
-
-For major decisions, explain:
+Follow this exact order:
 
 ```text
-Problem
-Options
-Chosen approach
-Why
-Trade-offs
+Phase 0   → Baseline audit
+Phase 1   → Domain core
+Phase 2   → Validation/API boundary
+Phase 3   → Single parcel
+Phase 4   → Batch architecture
+Phase 5   → Persistent batch state
+Phase 6   → Queue
+Phase 7   → Worker
+Phase 8   → Batch API + progress
+Phase 9   → Idempotency + failure handling
+Phase 10  → Reliability
+Phase 11  → Security
+Phase 12  → Observability
+Phase 13  → Testing + regression
+Phase 14  → Frontend integration
+Phase 15  → Final architecture review
+Phase 16  → Presentation/interview preparation
 ```
 
-Then implement.
-
-Do not blindly generate code.
-
----
-
-## Rule 5 — Keep business logic independent
-
-The routing engine should not be tightly coupled to:
-
-* HTTP
-* UI
-* Database
-* File upload
-* Framework-specific code
-
-The core business logic should be easy to test independently.
-
----
-
-## Rule 6 — Prioritize correctness at boundaries
-
-Whenever a business rule contains:
-
-```text
-<=
-<
->
->=
-```
-
-explicitly test the boundary.
-
-Do not assume the condition is correct.
-
----
-
-## Rule 7 — Every important feature gets tests
-
-When implementing a business rule:
-
-```text
-Implementation
-+
-Positive tests
-+
-Negative tests
-+
-Boundary tests
-+
-Regression tests
-```
-
----
-
-## Rule 8 — Make routing decisions explainable
-
-Whenever possible, the routing result should make clear:
-
-```text
-What decision was made
-Why it was made
-Which rule caused it
-```
-
-This is important for operators, debugging, testing, and auditability.
-
----
-
-## Rule 9 — Treat configuration changes as potentially dangerous
-
-If routing rules are configurable, consider:
-
-* Validation
-* Rule conflicts
-* Safe changes
-* Versioning
-* Testing
-* Rollback/recovery where appropriate
-
-Do not allow configuration changes to silently create invalid routing behavior.
-
----
-
-## Rule 10 — AI does not replace understanding
-
-If you generate code using AI:
-
-* Review it
-* Explain it
-* Test it
-* Modify it where appropriate
-* Document the reasoning
-
-I need to be able to defend the implementation during the interview.
-
----
-
-# HOW YOU SHOULD TEACH/HELP ME
-
-I am preparing this specifically for a technical assessment and interview.
-
-Therefore, don't just give me code.
-
-For important concepts, teach me in this order:
-
-```text
-1. Requirement
-2. Problem
-3. Design options
-4. Chosen approach
-5. Why this approach
-6. Trade-offs
-7. Implementation
-8. Tests
-9. Interview questions
-10. How to explain the decision in the interview
-```
-
-Keep explanations practical and interview-oriented.
-
-Focus especially on:
-
-* First principles
-* Why the architecture works
-* Failure scenarios
-* Edge cases
-* Trade-offs
-* Extensibility
-* Testing
-* Security
-* Production reasoning
-
-Avoid unnecessary theoretical explanations that do not help implement or defend this project.
-
----
-
-# IMPORTANT INTERVIEW PREPARATION
-
-For every major phase, help me prepare for questions such as:
-
-```text
-Why did you choose this approach?
-
-What alternatives did you consider?
-
-What happens if this component fails?
-
-How would you add a new routing rule?
-
-How do you prevent a rule change from breaking existing behavior?
-
-How do you test boundary conditions?
-
-How would this behave with a large batch?
-
-How would you debug an incorrect routing decision?
-
-How would you secure this endpoint?
-
-How would you know something went wrong in production?
-
-How would you investigate an unusual routing pattern?
-
-What did AI generate?
-
-What did you change from the AI output?
-
-Why?
-```
-
-Do not manufacture questions unrelated to the assessment.
-
----
-
-# FINAL PRINCIPLE
-
-The final system should demonstrate this engineering progression:
-
-```text
-Correct Business Logic
-        ↓
-Adaptable Rules
-        ↓
-Usable Interface
-        ↓
-Reliable Batch Processing
-        ↓
-Automated Testing
-        ↓
-Safe Evolution
-        ↓
-Security
-        ↓
-Failure Handling
-        ↓
-Observability
-        ↓
-Documentation
-        ↓
-Interview-Ready System
-```
-
-The goal is **not maximum complexity**.
-
-The goal is to demonstrate that I can take an open-ended business requirement and build a system that is:
-
-**correct, understandable, adaptable, testable, secure, reliable, and observable.**
+**Do not jump ahead. Complete and verify each phase before moving to the next.**

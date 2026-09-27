@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { routeBatch } from '../api';
+import { createBatch, pollBatchStatus, fetchBatchResults } from '../api';
 
 /**
  * BatchUpload — File upload component for batch parcel processing.
@@ -32,6 +32,7 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
   const [parcels, setParcels] = useState(null);
   const [parseError, setParseError] = useState(null);
   const [processing, setProcessing] = useState(false);
+  const [progress, setProgress] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -133,17 +134,28 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
   }
 
   /**
-   * Sends the parsed parcels to the backend for processing.
+   * Sends the parsed parcels to the backend for async processing (Master Phase 4/8).
+   * POST /api/batches -> 202 -> poll GET /api/batches/:id -> GET results.
    */
   async function handleProcess() {
     if (!parcels || parcels.length === 0) return;
 
     setProcessing(true);
+    setProgress({ status: 'QUEUED', processed: 0, total: parcels.length, progress: 0 });
     onClear();
 
     try {
-      const result = await routeBatch(parcels);
-      onBatchResult(result.data);
+      const created = await createBatch(parcels);
+      const finalStatus = await pollBatchStatus(created.batchId, {
+        intervalMs: 1000,
+        onProgress: (batch) => setProgress(batch),
+      });
+      const resultsPayload = await fetchBatchResults(created.batchId, { limit: 1000 });
+      onBatchResult({
+        batch: finalStatus,
+        results: resultsPayload.results,
+        resultCount: resultsPayload.resultCount,
+      });
     } catch (err) {
       onError(err);
     } finally {
@@ -159,6 +171,7 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
     setParcels(null);
     setParseError(null);
     setProcessing(false);
+    setProgress(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -234,6 +247,22 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
   ]
 }`}
           </pre>
+        </div>
+      )}
+
+      {/* Async progress (Master Phase 8: poll status, show progress) */}
+      {processing && progress && (
+        <div className="batch-progress">
+          <p>
+            Batch {progress.batchId || ''} — {progress.status}
+            {typeof progress.processed === 'number' && typeof progress.total === 'number' && (
+              <> · {progress.processed.toLocaleString()} / {progress.total.toLocaleString()} processed</>
+            )}
+            {typeof progress.progress === 'number' && <> · {progress.progress}%</>}
+          </p>
+          {typeof progress.progress === 'number' && (
+            <progress value={progress.progress} max="100" style={{ width: '100%' }} />
+          )}
         </div>
       )}
 

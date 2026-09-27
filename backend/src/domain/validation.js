@@ -59,6 +59,26 @@ function validateParcelInput(input) {
 
 // --- Individual field validators ---
 
+function parseStrictNumber(raw) {
+  if (typeof raw === 'number') {
+    return raw;
+  }
+  if (typeof raw !== 'string') {
+    return NaN;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return NaN;
+  }
+  // Strict numeric format: optional sign, digits with optional decimal, optional exponent.
+  // Rejects permissive parses like parseFloat("5abc") -> 5, hex, Infinity, etc.
+  if (!/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(trimmed)) {
+    return NaN;
+  }
+  const parsed = Number(trimmed);
+  return parsed;
+}
+
 /**
  * Weight must be a positive number (> 0).
  * Rejects: missing, non-numeric, zero, negative.
@@ -69,7 +89,7 @@ function validateWeight(weight, errors) {
     return undefined;
   }
 
-  const parsed = typeof weight === 'string' ? parseFloat(weight) : weight;
+  const parsed = parseStrictNumber(weight);
 
   if (typeof parsed !== 'number' || isNaN(parsed)) {
     errors.push({
@@ -113,7 +133,7 @@ function validateValue(value, errors) {
     return undefined;
   }
 
-  const parsed = typeof value === 'string' ? parseFloat(value) : value;
+  const parsed = parseStrictNumber(value);
 
   if (typeof parsed !== 'number' || isNaN(parsed)) {
     errors.push({

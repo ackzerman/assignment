@@ -37,6 +37,7 @@
  */
 const departmentRules = [
   {
+    id: 'department.mail',
     name: 'mail-department',
     department: 'Mail',
     priority: 1,
@@ -45,6 +46,7 @@ const departmentRules = [
       `Parcel weight (${parcel.weight}kg) is 1kg or less.`,
   },
   {
+    id: 'department.regular',
     name: 'regular-department',
     department: 'Regular',
     priority: 2,
@@ -53,6 +55,7 @@ const departmentRules = [
       `Parcel weight (${parcel.weight}kg) is between 1kg and 10kg.`,
   },
   {
+    id: 'department.heavy',
     name: 'heavy-department',
     department: 'Heavy',
     priority: 3,
@@ -69,6 +72,7 @@ const departmentRules = [
  */
 const approvalRules = [
   {
+    id: 'approval.insurance',
     name: 'insurance-required',
     type: 'Insurance',
     condition: (parcel) => parcel.value > 1000,
@@ -76,6 +80,7 @@ const approvalRules = [
       `Parcel value (€${parcel.value}) exceeds €1,000.`,
   },
   {
+    id: 'approval.manual-review',
     name: 'manual-review-required',
     type: 'Manual Review',
     condition: (parcel) => parcel.value > 5000,

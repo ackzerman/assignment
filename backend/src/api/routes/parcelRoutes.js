@@ -22,11 +22,11 @@ const { recordRouting, recordFailure, recordBatch, recordProcessingTime } = requ
 const router = express.Router();
 
 /**
- * POST /api/parcels/route
- *
- * Validates and routes a single parcel.
+ * Shared single-parcel handler (synchronous, per Master Phase 3).
+ * Used by both POST /api/parcels (canonical) and POST /api/parcels/route (legacy alias).
+ * Returns the master-prompt explainable shape alongside legacy detail fields.
  */
-router.post('/route', (req, res, next) => {
+function handleSingleParcel(req, res, next) {
   const start = Date.now();
 
   try {
@@ -44,16 +44,19 @@ router.post('/route', (req, res, next) => {
       throw new ValidationFailedError(validation.errors);
     }
 
-    // Step 2: Route
+    // Step 2: Route (shared domain core)
     const result = routeParcel(validation.parcel);
 
     // Step 3: Record metrics
     recordRouting(result.department, result.approvals);
     recordProcessingTime(Date.now() - start);
 
+    const parcelId = input.parcelId || `P-${randomUUID().split('-')[0]}`;
+
     logger.info('Parcel routed', {
       requestId: req.id,
       operation: 'route_parcel',
+      parcelId,
       department: result.department,
       requiresApproval: result.requiresApproval,
       rule: result.departmentRule,
@@ -62,12 +65,39 @@ router.post('/route', (req, res, next) => {
 
     res.status(200).json({
       status: 'success',
-      data: result,
+      data: {
+        // Master-prompt canonical explainable contract
+        parcelId,
+        department: result.department,
+        approvals: result.approvals.map((a) => a.type),
+        matchedRules: result.matchedRules,
+        reasons: result.reasons,
+        // Legacy detail fields (backward compatible)
+        departmentReason: result.departmentReason,
+        departmentRule: result.departmentRule,
+        requiresApproval: result.requiresApproval,
+        approvalsDetail: result.approvals,
+        parcel: result.parcel,
+        routedAt: result.routedAt,
+      },
     });
   } catch (error) {
     next(error);
   }
-});
+}
+
+/**
+ * POST /api/parcels — canonical single-parcel endpoint (Master Phase 3).
+ * Synchronous, returns 200 OK with the routing result.
+ */
+router.post('/', handleSingleParcel);
+
+/**
+ * POST /api/parcels/route — legacy alias, kept for backward compatibility.
+ *
+ * Validates and routes a single parcel.
+ */
+router.post('/route', handleSingleParcel);
 
 /**
  * POST /api/parcels/validate

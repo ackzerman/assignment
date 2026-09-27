@@ -14,6 +14,7 @@
 
 const { randomUUID } = require('crypto');
 const { logger } = require('../../observability/logger');
+const { recordHttpRequest } = require('../../observability/metrics');
 
 /**
  * Assigns a unique request ID to every request.
@@ -42,6 +43,13 @@ function requestLogger(req, res, next) {
   // Log on response finish
   res.on('finish', () => {
     const duration = Date.now() - start;
+
+    // Master observability: every request counted (count, errors, latency).
+    try {
+      recordHttpRequest(res.statusCode, duration);
+    } catch {
+      // Metrics must never break request handling.
+    }
 
     // Skip health check logging (too noisy)
     if (req.path === '/api/health') return;
