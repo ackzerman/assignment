@@ -3,11 +3,11 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import RoutingResult from './components/RoutingResult.jsx';
 
-// Approval headings render as "✓ {type}" inside <strong>.
-const strongWith = (text) =>
-  screen.getByText((_, el) => el?.tagName === 'STRONG' && (el.textContent || '').includes(text));
+// Approval types render as colored badges (span.dept-badge-sm).
+const badgeWith = (text) => screen.getByText(text, { selector: 'span.dept-badge-sm' });
 
-function parcelResult(overrides = {}) {  return {
+function parcelResult(overrides = {}) {
+  return {
     parcelId: 'P1',
     department: 'Regular',
     departmentReason: 'Parcel weight (5kg) is between 1kg and 10kg.',
@@ -27,6 +27,7 @@ describe('RoutingResult approvals (generic, data-driven)', () => {
   afterEach(() => {
     cleanup();
   });
+
   it('no approvals → neutral message, no Reasons section', () => {
     render(<RoutingResult result={parcelResult()} />);
     expect(screen.getByText('No additional approval required.')).toBeTruthy();
@@ -35,8 +36,8 @@ describe('RoutingResult approvals (generic, data-driven)', () => {
     expect(screen.queryByText('Reasons')).toBeNull();
   });
 
-  it('Insurance approval renders type + Required + reason', () => {
-    render(
+  it('Insurance approval renders as badge + separate Required badge + reason', () => {
+    const { container } = render(
       <RoutingResult
         result={parcelResult({
           requiresApproval: true,
@@ -45,9 +46,16 @@ describe('RoutingResult approvals (generic, data-driven)', () => {
         })}
       />,
     );
-    expect(strongWith("Insurance")).toBeTruthy();
-    expect(screen.getAllByText('Required').length).toBeGreaterThan(0);
+    const badge = badgeWith('Insurance');
+    expect(badge).toBeTruthy();
+    expect(badge.className).toContain('dept-badge-sm');
+    const required = screen.getAllByText('Required');
+    expect(required).toHaveLength(1);
+    expect(required[0].className).toContain('approval-badge');
+    expect(required[0].tagName).toBe('SPAN');
     expect(screen.getByText('Parcel value exceeds €1,000.')).toBeTruthy();
+    // No checkmarks anywhere in the approvals UI.
+    expect(container.querySelector('.approvals-list').textContent).not.toContain('✓');
     expect(screen.queryByText('Reasons')).toBeNull();
   });
 
@@ -61,7 +69,7 @@ describe('RoutingResult approvals (generic, data-driven)', () => {
         })}
       />,
     );
-    expect(strongWith("Manual Review")).toBeTruthy();
+    expect(badgeWith('Manual Review')).toBeTruthy();
     expect(screen.queryByText('Insurance')).toBeNull();
     expect(screen.queryByText('Reasons')).toBeNull();
   });
@@ -79,13 +87,13 @@ describe('RoutingResult approvals (generic, data-driven)', () => {
         })}
       />,
     );
-    expect(strongWith("Insurance")).toBeTruthy();
-    expect(strongWith("Manual Review")).toBeTruthy();
+    expect(badgeWith('Insurance')).toBeTruthy();
+    expect(badgeWith('Manual Review')).toBeTruthy();
     expect(screen.getAllByText('Required')).toHaveLength(2);
   });
 
   it('a future approval type renders without code changes', () => {
-    render(
+    const { container } = render(
       <RoutingResult
         result={parcelResult({
           requiresApproval: true,
@@ -93,8 +101,9 @@ describe('RoutingResult approvals (generic, data-driven)', () => {
         })}
       />,
     );
-    expect(strongWith("Manager Approval")).toBeTruthy();
+    expect(badgeWith('Manager Approval')).toBeTruthy();
     expect(screen.getByText('High-value parcel requires manager review.')).toBeTruthy();
     expect(screen.getAllByText('Required')).toHaveLength(1);
+    expect(container.querySelector('.approvals-list').textContent).not.toContain('✓');
   });
 });

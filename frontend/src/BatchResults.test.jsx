@@ -8,9 +8,8 @@ vi.mock('./api.js', () => ({
   fetchBatchResults: vi.fn(),
 }));
 
-// Approval headings render as "✓ {type}" inside <strong>.
-const strongWith = (text) =>
-  screen.getByText((_, el) => el?.tagName === 'STRONG' && (el.textContent || '').includes(text));
+// Approval types render as colored badges (span.dept-badge-sm).
+const badgeWith = (text) => screen.getByText(text, { selector: 'span.dept-badge-sm' });
 
 const batch = {
   batchId: 'BATCH-1',
@@ -54,7 +53,7 @@ describe('BatchResults approvals (generic, data-driven)', () => {
     fireEvent.click(buttons[0]);
   }
 
-  it('renders each approval with Required + reason, no rule IDs', async () => {
+  it('renders each approval as badge + Required + reason, no rule IDs', async () => {
     fetchBatchResults.mockResolvedValue({
       results: rowsFor({
         parcelId: 'P2',
@@ -73,14 +72,16 @@ describe('BatchResults approvals (generic, data-driven)', () => {
       }),
       resultCount: 2,
     });
-    render(<BatchResults data={{ batch, resultCount: 2 }} />);
+    const { container } = render(<BatchResults data={{ batch, resultCount: 2 }} />);
     await expandFirstRow();
 
-    expect(strongWith("Insurance")).toBeTruthy();
+    expect(badgeWith('Insurance')).toBeTruthy();
     expect(screen.getByText('Parcel value exceeds €1,000.')).toBeTruthy();
     // Raw rule IDs are never operator content.
     expect(screen.queryByText(/approval\.insurance/)).toBeNull();
     expect(screen.queryByText(/department\.regular/)).toBeNull();
+    // No checkmarks in the expanded approval details.
+    expect(container.querySelector('.batch-detail-panel').textContent).not.toContain('✓');
   });
 
   it('Manual Review only shows no Insurance indicator', async () => {
@@ -104,7 +105,7 @@ describe('BatchResults approvals (generic, data-driven)', () => {
     render(<BatchResults data={{ batch, resultCount: 1 }} />);
     await expandFirstRow();
 
-    expect(strongWith("Manual Review")).toBeTruthy();
+    expect(badgeWith('Manual Review')).toBeTruthy();
     expect(screen.getAllByText('Required')).toHaveLength(1);
     expect(screen.queryByText('Insurance')).toBeNull();
   });
@@ -130,8 +131,19 @@ describe('BatchResults approvals (generic, data-driven)', () => {
     render(<BatchResults data={{ batch, resultCount: 1 }} />);
     await expandFirstRow();
 
-    expect(strongWith("Customs Approval")).toBeTruthy();
+    expect(badgeWith('Customs Approval')).toBeTruthy();
     expect(screen.getByText('Customs check needed.')).toBeTruthy();
     await waitFor(() => expect(screen.getAllByText('Required')).toHaveLength(1));
+  });
+
+  it('shows status in the heading and the UUID only as a secondary reference', async () => {
+    fetchBatchResults.mockResolvedValue({ results: [], resultCount: 0 });
+    const { container } = render(<BatchResults data={{ batch, resultCount: 0 }} />);
+
+    const metaText = container.querySelector('.batch-meta').textContent;
+    expect(metaText).toContain('Batch COMPLETED');
+    expect(metaText).toContain('Batch reference: BATCH-1');
+    // Raw UUID is not the prominent heading.
+    expect(metaText).not.toContain('Batch BATCH-1');
   });
 });

@@ -21,6 +21,7 @@ import { useState, useEffect } from 'react';
 import { fetchBatchResults } from '../api';
 import { PAGE_SIZE, pageCountFor, clampPage } from '../pagination';
 import { normalizeApprovals } from '../approvals';
+import ApprovalItem from './ApprovalItem';
 
 // Department display colors (same as RoutingResult)
 const DEPT_COLORS = {
@@ -119,9 +120,10 @@ export default function BatchResults({ data }) {
       {batch && (
         <div className="batch-meta">
           <p>
-            Batch {batch.batchId} — {batch.status}
+            Batch {batch.status}
             {typeof batch.progress === 'number' && <> · {batch.progress}%</>}
           </p>
+          <p className="na-text batch-reference">Batch reference: {batch.batchId}</p>
         </div>
       )}
 
@@ -281,11 +283,7 @@ export default function BatchResults({ data }) {
                     <ul>
                       {normalizeApprovals(r.approvals).map((a, i) => (
                         <li key={i}>
-                          <strong>✓ {a.type}</strong>{' '}
-                          <span className="approval-badge required">Required</span>
-                          {a.reason ? (
-                            <div className="reason-text">{a.reason}</div>
-                          ) : null}
+                          <ApprovalItem approval={a} />
                         </li>
                       ))}
                     </ul>

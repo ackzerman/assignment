@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeApprovals } from './approvals.js';
+import { normalizeApprovals, approvalBadgeStyle } from './approvals.js';
 
 describe('normalizeApprovals (generic approval rendering)', () => {
   it('no approvals → empty list ("No additional approval required.")', () => {
@@ -42,5 +42,23 @@ describe('normalizeApprovals (generic approval rendering)', () => {
 
   it('drops entries without a usable type', () => {
     expect(normalizeApprovals([null, {}, { reason: 'no type' }, { type: '', reason: 'x' }])).toEqual([]);
+  });
+});
+
+describe('approvalBadgeStyle (deterministic, data-driven colors)', () => {
+  it('returns a readable background/color pair', () => {
+    const style = approvalBadgeStyle('Insurance');
+    expect(typeof style.background).toBe('string');
+    expect(typeof style.color).toBe('string');
+  });
+
+  it('is deterministic per type', () => {
+    expect(approvalBadgeStyle('Insurance')).toEqual(approvalBadgeStyle('Insurance'));
+  });
+
+  it('supports unknown future types without code changes', () => {
+    const style = approvalBadgeStyle('Customs Approval');
+    expect(typeof style.background).toBe('string');
+    expect(typeof style.color).toBe('string');
   });
 });

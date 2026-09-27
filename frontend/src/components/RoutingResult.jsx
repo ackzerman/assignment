@@ -19,6 +19,7 @@ const DEPT_COLORS = {
 };
 
 import { normalizeApprovals } from '../approvals';
+import ApprovalItem from './ApprovalItem';
 
 export default function RoutingResult({ result }) {
   if (!result) return null;
@@ -67,11 +68,7 @@ export default function RoutingResult({ result }) {
             <ul className="approvals-list">
               {approvals.map((approval, index) => (
                 <li key={index}>
-                  <strong>✓ {approval.type}</strong>{' '}
-                  <span className="approval-badge required">Required</span>
-                  {approval.reason ? (
-                    <div className="reason-text">{approval.reason}</div>
-                  ) : null}
+                  <ApprovalItem approval={approval} />
                 </li>
               ))}
             </ul>
