@@ -215,6 +215,12 @@ async function processBatchJob(job, options = {}) {
       activeChunk = chunk;
 
       const chunkResults = [];
+      // Outcomes are staged locally and recorded as authoritative business
+      // metrics ONLY if the checkpoint below commits. A stale/rejected
+      // checkpoint (retry/recompute) must not inflate parcel counts,
+      // failure counts, or routing distributions.
+      const stagedRoutings = [];
+      let stagedFailures = 0;
       let chunkSuccessful = 0;
       let chunkFailed = 0;
 
@@ -231,11 +237,10 @@ async function processBatchJob(job, options = {}) {
 
         if (result.status === 'routed') {
           chunkSuccessful++;
-          // Record metrics for observability
-          recordRouting(result.department, result.approvals || []);
+          stagedRoutings.push(result);
         } else {
           chunkFailed++;
-          recordFailure();
+          stagedFailures++;
         }
       }
 
@@ -270,6 +275,16 @@ async function processBatchJob(job, options = {}) {
         continue;
       }
       consecutiveStaleCheckpoints = 0;
+
+      // Checkpoint committed: this chunk's work is now authoritative, so
+      // record its business metrics exactly once. Attempt/error observability
+      // stays separate (logs, recordError on unexpected failures).
+      for (const r of stagedRoutings) {
+        recordRouting(r.department, r.approvals || []);
+      }
+      for (let i = 0; i < stagedFailures; i++) {
+        recordFailure();
+      }
 
       if (checkpoint.duplicates > 0) {
         logger.warn('Duplicate parcel results absorbed by idempotency', {

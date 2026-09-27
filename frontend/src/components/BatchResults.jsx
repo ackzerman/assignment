@@ -20,6 +20,7 @@
 import { useState, useEffect } from 'react';
 import { fetchBatchResults } from '../api';
 import { PAGE_SIZE, pageCountFor, clampPage } from '../pagination';
+import { hasInsuranceApproval } from '../approvals';
 
 // Department display colors (same as RoutingResult)
 const DEPT_COLORS = {
@@ -219,7 +220,7 @@ export default function BatchResults({ data }) {
                 </td>
                 <td>
                   {r.status === 'routed' ? (
-                    r.requiresApproval ? (
+                    hasInsuranceApproval(r.approvals) ? (
                       <span className="approval-badge-sm required">Required</span>
                     ) : (
                       <span className="approval-badge-sm not-required">No</span>

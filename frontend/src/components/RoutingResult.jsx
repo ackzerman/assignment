@@ -18,6 +18,8 @@ const DEPT_COLORS = {
   Heavy: '#f59e0b',    // amber
 };
 
+import { hasInsuranceApproval } from '../approvals';
+
 export default function RoutingResult({ result }) {
   if (!result) return null;
 
@@ -28,10 +30,7 @@ export default function RoutingResult({ result }) {
     || (Array.isArray(result.approvals) && result.approvals.length > 0 && typeof result.approvals[0] === 'object'
       ? result.approvals
       : []);
-  const approvalNames = Array.isArray(result.approvals)
-    ? result.approvals.map((a) => (typeof a === 'string' ? a : a.type))
-    : [];
-  const needsApproval = result.requiresApproval ?? approvalNames.length > 0;
+  const requiresInsurance = hasInsuranceApproval(result.approvalsDetail || result.approvals);
 
   return (
     <div className="routing-result">
@@ -58,11 +57,13 @@ export default function RoutingResult({ result }) {
         </div>
       </div>
 
-      {/* Approvals */}
+      {/* Approvals: Insurance column reflects an Insurance approval
+          specifically — NOT the generic requiresApproval flag (which is
+          also true for e.g. Manual Review). */}
       <div className="result-section">
         <div className="result-label">Insurance</div>
         <div className="result-value">
-          {needsApproval ? (
+          {requiresInsurance ? (
             <span className="approval-badge required">Required</span>
           ) : (
             <span className="approval-badge not-required">Not Required</span>
