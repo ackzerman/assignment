@@ -1,5 +1,19 @@
 # MASTER IMPLEMENTATION PROMPT — Parcel Routing System
 
+> **IMPLEMENTATION AMENDMENT (adopted):** the assessment defines no user
+> accounts and no permanent batch history, so the implementation is
+> deliberately simpler than some sections below suggest:
+> * **No authentication / no batch ownership** — the API is anonymous/public;
+>   security comes from rate limiting, validation, request limits, safe
+>   errors, and infrastructure isolation (§25 applies except Authentication /
+>   Authorization, which are intentionally not implemented).
+> * **No relational database** — temporary Redis state (TTL-expired) holds
+>   batch progress, chunk checkpoints, and results; there is no permanent
+>   batch listing or history (§13/§14/§19/§33/§34 apply with "Redis temporary
+>   state" in place of "database", and Redis `HSETNX` parcel writes in place
+>   of a SQL unique constraint).
+> * Flow is upload → process → show results → session ends / state expires.
+
 ## ROLE
 
 You are a senior backend/full-stack engineer implementing and hardening the existing **Parcel Routing System**.
@@ -119,7 +133,7 @@ The architecture should conceptually remain:
                                          |
                                        Rules
                                          |
-                                      Database
+                                 Redis state/results
                                          |
                                   Status / Results
                                          |
@@ -158,7 +172,7 @@ The core domain should not depend on:
 * Redis
 * BullMQ
 * HTTP request/response objects
-* database models
+* state models
 * frontend code
 
 The conceptual dependency should be:
@@ -411,7 +425,6 @@ These should produce appropriate client errors.
 
 Examples:
 
-* database failure
 * Redis failure
 * programming error
 
@@ -420,7 +433,7 @@ These should go through centralized error handling.
 Never expose:
 
 * stack traces
-* internal database details
+* internal state details
 * secrets
 * implementation internals
 
@@ -631,11 +644,11 @@ but do not introduce this complexity prematurely.
 
 ---
 
-# 13. PHASE 5 — PERSISTENT BATCH STATE
+# 13. PHASE 5 — TEMPORARY BATCH STATE (Redis, TTL-expired)
 
-A database is required for the asynchronous batch workflow because the system needs durable application state.
+Temporary Redis state is required for the asynchronous batch workflow because the system needs application state while processing. No permanent history is retained: keys expire after the session.
 
-The database answers:
+Redis state answers:
 
 > **What happened?**
 
@@ -688,9 +701,10 @@ rather than unnecessarily storing redundant values.
 
 ---
 
-# 14. PARCEL RESULT PERSISTENCE
+# 14. PARCEL RESULT TEMPORARY STORAGE
 
-Persist the routing result.
+Store the routing result in temporary Redis state (TTL-expired) for the
+active processing session.
 
 For example:
 
@@ -707,14 +721,13 @@ createdAt
 
 This provides:
 
-* durable results
+* temporary results for the session
 * status retrieval
 * explainability
-* auditability
 * idempotency
 * recovery after worker crashes
 
-Explainability is **one reason** to persist results, not the only reason.
+Explainability is **one reason** to store results, not the only reason.
 
 ---
 
@@ -731,7 +744,7 @@ Worker
   ↓
 updates progress
   ↓
-Database
+Redis state
   ↓
 API
   ↓
@@ -834,7 +847,7 @@ Example:
 
 Do not force the client to keep the original request payload in memory.
 
-The database is the durable source of truth for asynchronous results.
+Temporary Redis state is the source of truth for asynchronous results during the session.
 
 ---
 
@@ -911,12 +924,13 @@ but still be different parcels.
 
 ---
 
-# 19. DATABASE-LEVEL DUPLICATE PROTECTION
+# 19. REDIS-LEVEL DUPLICATE PROTECTION
 
-Persist results with a unique constraint such as:
+Store results with an idempotent Redis write (one `HSETNX` per parcel result
+inside the checkpoint transaction):
 
 ```text
-UNIQUE(batchId, parcelId)
+HSETNX batch:{id}:results {parcelIndex} {result}
 ```
 
 This is the authoritative protection against duplicate final records.
@@ -932,14 +946,14 @@ Idempotent worker
         ↓
 Stable parcel identity
         ↓
-DB unique constraint
+Redis HSETNX result writes
         ↓
 Correct final state
 ```
 
 Queue-level job IDs can reduce accidental duplicate jobs, but they are NOT sufficient as the only idempotency mechanism.
 
-The database must protect the final state.
+Redis idempotent writes must protect the final state.
 
 ---
 
@@ -977,7 +991,7 @@ Examples:
 
 ```text
 Redis temporary failure
-database connection interruption
+Redis connection interruption
 temporary network failure
 ```
 
@@ -1050,7 +1064,7 @@ finish/stop current processing safely
  ↓
 close queue connections
  ↓
-close database connections
+close Redis connection
  ↓
 exit
 ```
@@ -1198,19 +1212,14 @@ Use secure HTTP headers.
 
 ## Authentication
 
-If authentication is introduced, verify identity before accessing resources.
+Not implemented: the assessment defines no users or accounts, so the API is
+intentionally anonymous. Do not add JWT/sessions/login.
 
 ## Authorization
 
-A valid user must not automatically be allowed to access every batch.
-
-For:
-
-```http
-GET /api/batches/B123
-```
-
-verify the user owns or is authorized to access `B123`.
+Not implemented: there are no users and no private batches, so there is
+nothing to own or scope. Anonymous abuse is handled with rate limiting,
+validation, request/body/batch limits, safe errors, and Redis isolation.
 
 Prevent object-level authorization issues.
 
@@ -1219,11 +1228,9 @@ Prevent object-level authorization issues.
 Never commit:
 
 * Redis credentials
-* database credentials
 * API keys
-* JWT secrets
 
-Use environment variables/secrets management.
+Use environment variables/secrets management. Redis must not be publicly exposed.
 
 ---
 
@@ -1356,7 +1363,7 @@ API
  ↓
 domain
  ↓
-database/queue boundaries
+Redis/queue boundaries
 ```
 
 Use Supertest where appropriate.
@@ -1534,9 +1541,10 @@ Use consistent error responses.
 
 ---
 
-# 33. DATABASE RESPONSIBILITIES
+# 33. REDIS TEMPORARY-STATE RESPONSIBILITIES
 
-The database is responsible for durable application state.
+Temporary Redis state (TTL-expired, no permanent history) is responsible for
+batch state while processing.
 
 It should support:
 
@@ -1547,10 +1555,9 @@ parcel identity
 routing results
 idempotency
 explainability
-auditability
 ```
 
-The database is NOT being introduced simply because:
+Redis temporary state is NOT being introduced simply because:
 
 > "async systems require databases."
 
@@ -1561,16 +1568,17 @@ The correct reasoning is:
 ```text
 Queue → durable work
 
-Database → durable business/application state
+Redis state → temporary batch/application state for the active session
 ```
 
-A queue-only architecture can exist if there is no requirement to persist state/results.
-
-This system does require persistent batch state/results, so a database is justified.
+A queue-only architecture can exist if there is no requirement to keep state/results.
+This system keeps temporary batch state/results in Redis (TTL-expired) because
+the worker, progress polling, and result display need them during processing —
+not because history must be retained.
 
 ---
 
-# 34. QUEUE VS DATABASE — MENTAL MODEL
+# 34. QUEUE VS REDIS STATE — MENTAL MODEL
 
 Always preserve this distinction:
 
@@ -1581,7 +1589,7 @@ QUEUE
 
         vs
 
-DATABASE
+REDIS TEMPORARY STATE
 
 "What happened / what is the current state?"
 ```
@@ -1592,7 +1600,7 @@ Example:
 Queue:
 Process Batch B123
 
-Database:
+Redis state:
 B123
 10,000 total
 6,200 processed
@@ -1709,7 +1717,7 @@ Before declaring the project complete, verify:
 * [ ] Worker owns asynchronous execution
 * [ ] Single parcel remains synchronous
 * [ ] Batch is asynchronous
-* [ ] Database owns durable state
+* [ ] Redis owns temporary state (TTL-expired, no permanent history)
 * [ ] Queue owns durable work
 
 ### Correctness
@@ -1724,8 +1732,8 @@ Before declaring the project complete, verify:
 ### Batch
 
 * [ ] 202 response
-* [ ] batchId
-* [ ] persistent batch state
+* [ ] batchId (full UUID, unpredictable)
+* [ ] temporary batch state (TTL-expired)
 * [ ] worker
 * [ ] queue
 * [ ] progress
@@ -1753,9 +1761,9 @@ Before declaring the project complete, verify:
 * [ ] rate limiting
 * [ ] Helmet
 * [ ] CORS correctly configured
-* [ ] authentication where required
-* [ ] authorization/object ownership
+* [ ] no authentication by design (anonymous public API; abuse handled via the above)
 * [ ] secrets protected
+* [ ] Redis not publicly exposed
 * [ ] safe error responses
 
 ### Observability
@@ -1844,7 +1852,7 @@ Express
    ↓
 Domain Core
    ↓
-Database
+Response
 
 Batch:
 Express
@@ -1855,7 +1863,7 @@ Worker
    ↓
 Domain Core
    ↓
-Database
+Redis state/results (TTL)
 ```
 
 ---
@@ -1919,7 +1927,7 @@ The final presentation should be explainable as:
    ↓
 6. Queue + worker architecture
    ↓
-7. Database for durable state/results
+7. Redis temporary state/results (TTL-expired)
    ↓
 8. Idempotency and duplicate handling
    ↓
@@ -1938,7 +1946,7 @@ The final presentation should be explainable as:
 
 The key architectural sentence to remember is:
 
-> **Single parcels are processed synchronously through the shared domain core, while batches are durably queued and processed asynchronously by workers using that exact same domain core. The queue manages work, the database manages durable state and results, and the API exposes progress and results to the frontend.**
+> **Single parcels are processed synchronously through the shared domain core, while batches are durably queued and processed asynchronously by workers using that exact same domain core. The queue manages work, Redis holds temporary state and results, and the API exposes progress and results to the frontend.**
 
 ---
 

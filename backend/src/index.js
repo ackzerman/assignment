@@ -1,23 +1,24 @@
 /**
  * Server Entry Point
  *
- * Starts the Express server, initializes infrastructure (database + queue + worker),
- * and handles graceful shutdown.
+ * Starts the Express server, initializes infrastructure (Redis + queue + worker),
+ * and handles graceful shutdown. There is no relational database: Redis holds
+ * all temporary batch state (TTL-expired after the processing session).
  *
  * Separated from app.js so tests can import the app without starting
  * the full server or infrastructure.
  *
- * Graceful shutdown sequence (Phase 10: Reliability):
+ * Graceful shutdown sequence:
  * 1. Stop accepting new HTTP connections
  * 2. Stop the worker (finish current job)
  * 3. Close the queue connection
- * 4. Close the database connection
+ * 4. Close the Redis connection
  * 5. Exit
  */
 
 require('dotenv').config();
 const app = require('./app');
-const { initDatabase, closeDatabase } = require('./infrastructure/database');
+const { pingRedis, closeRedis } = require('./infrastructure/redis');
 const { initQueue, closeQueue } = require('./infrastructure/queue');
 const { createWorker, closeWorker } = require('./infrastructure/worker');
 const { logger } = require('./observability/logger');
@@ -29,9 +30,14 @@ let server;
 
 async function start() {
   try {
-    // 1. Initialize database (synchronous, immediate)
-    initDatabase();
-    logger.info('Database ready');
+    // 1. Verify Redis (temporary batch state + queue backend).
+    // Start serving anyway when Redis is down so /health/ready can report
+    // not_ready; batch creation fails fast with 503 until Redis recovers.
+    if (await pingRedis()) {
+      logger.info('Redis ready');
+    } else {
+      logger.warn('Redis unavailable at startup; batch creation will return 503 until it recovers');
+    }
 
     // 2. Initialize queue (connects to Redis)
     initQueue();
@@ -87,9 +93,9 @@ async function shutdown(signal) {
     await closeQueue();
     logger.info('Queue closed');
 
-    // 4. Close database connection
-    closeDatabase();
-    logger.info('Database closed');
+    // 4. Close Redis connection
+    await closeRedis();
+    logger.info('Redis closed');
 
     logger.info('Shutdown complete');
     console.log('[Server] Shutdown complete.');

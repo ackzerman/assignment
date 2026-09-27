@@ -90,23 +90,18 @@ app.get('/health/live', (_req, res) => {
 /**
  * GET /health/ready — Readiness check
  * Answers: "Can this instance safely receive work?"
- * Checks critical dependencies: database and queue connectivity.
+ * Checks critical dependencies: Redis state and queue connectivity.
  */
 app.get('/health/ready', async (_req, res) => {
   const checks = {};
 
-  // Check database
+  // Check Redis (authoritative temporary batch state)
   try {
-    const { getDb } = require('./infrastructure/database');
-    const db = getDb();
-    if (db) {
-      db.prepare('SELECT 1').get();
-      checks.database = { status: 'ok' };
-    } else {
-      checks.database = { status: 'not_initialized' };
-    }
+    const { pingRedis } = require('./infrastructure/redis');
+    const ok = await pingRedis();
+    checks.redis = ok ? { status: 'ok' } : { status: 'error', message: 'Redis unavailable' };
   } catch (err) {
-    checks.database = { status: 'error', message: err.message };
+    checks.redis = { status: 'error', message: err.message };
   }
 
   // Check queue

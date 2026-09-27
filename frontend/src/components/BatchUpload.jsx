@@ -134,8 +134,10 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
   }
 
   /**
-   * Sends the parsed parcels to the backend for async processing (Master Phase 4/8).
-   * POST /api/batches -> 202 -> poll GET /api/batches/:id -> GET results.
+   * Sends the parsed parcels to the backend for async processing.
+   * POST /api/batches -> 202 -> poll GET /api/batches/:id -> results are
+   * paged (BatchResults loads one page at a time, so 10k-parcel batches
+   * never blow up the DOM or need silent truncation).
    */
   async function handleProcess() {
     if (!parcels || parcels.length === 0) return;
@@ -150,11 +152,11 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
         intervalMs: 1000,
         onProgress: (batch) => setProgress(batch),
       });
-      const resultsPayload = await fetchBatchResults(created.batchId, { limit: 1000 });
+      // Only the count is needed up front; pages load on demand.
+      const firstPage = await fetchBatchResults(created.batchId, { limit: 1 });
       onBatchResult({
         batch: finalStatus,
-        results: resultsPayload.results,
-        resultCount: resultsPayload.resultCount,
+        resultCount: firstPage.resultCount,
       });
     } catch (err) {
       onError(err);

@@ -162,7 +162,7 @@ describe('Security Middleware', () => {
       }));
 
       const res = await request(app)
-        .post('/api/parcels/batch')
+        .post('/api/batches')
         .send({ parcels });
 
       expect(res.status).toBe(400);

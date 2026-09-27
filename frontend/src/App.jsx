@@ -96,7 +96,9 @@ export default function App() {
             {error && <ErrorDisplay error={error} />}
 
             {activeTab === 'single' && result && <RoutingResult result={result} />}
-            {activeTab === 'batch' && batchResult && <BatchResults data={batchResult} />}
+            {activeTab === 'batch' && batchResult && (
+              <BatchResults key={batchResult.batch?.batchId || 'batch'} data={batchResult} />
+            )}
 
             {!result && !batchResult && !error && (
               <div className="empty-state">

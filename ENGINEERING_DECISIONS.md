@@ -513,7 +513,7 @@ Section 7 of the Technical Assessment states:
 | **11**| Testing | Pure Domain Unit Testing (72 tests) | 100% boundary coverage in <100ms |
 | **12**| Debuggability | Pure Predicate Functions | Fast reproduction and fix during interviews |
 | **13**| Batch Format | JSON over XML | Native JS parsing, simpler syntax, smaller files |
-| **14**| Batch Architecture | Chunked Sync Processing with Event Loop Yields | Right-sized for assessment, no external deps |
+| **14**| Batch Architecture | BullMQ + Redis, chunk checkpoints, TTL state | Async recovery, no DB/auth, single implementation |
 | **15**| New Rule Workflow | Feature Branch → Tests → Merge (Git Workflow) | Safe, reviewable, documented process |
 | **16**| Regression Strategy | Parameterized Snapshot Table + Boundary Tests | 18 data points covering all rule interactions |
 
@@ -583,43 +583,43 @@ The spec requires: "Design batch processing so large files do not unnecessarily 
 | **Dependencies** | None | None | Bull, Redis | JSONStream |
 | **Responsiveness** | Blocks event loop for large batches | Yields between chunks | Non-blocking | Non-blocking |
 | **Progress reporting** | None possible | Easy (callback per chunk) | Requires polling | Possible but complex |
-| **Assessment fit** | Too naive | Right-sized ✓ | Overkill | Slightly over-engineered |
+| **Assessment fit** | Too naive | Blocks the event loop per request | **Selected ✓ (async + Redis checkpoints)** | Slightly over-engineered |
 
 ### Chosen Decision & Rationale
 
-**Option B: Chunked synchronous processing** — This provides the right balance:
-- `setImmediate()` between chunks prevents blocking the event loop
-- Progress callback enables real-time UI updates
-- No external dependencies (no Redis, no Bull)
-- The JSON body is already parsed by Express (`express.json()` with a 10MB limit), so streaming the parser wouldn't save memory — the JSON is already in memory
-- Configurable chunk size (default 100, injectable for testing)
+**Option C: Background job queue (BullMQ + Redis) with Redis chunk checkpoints**
+— the assessment's batch flow (upload → process → show results → session ends)
+needs asynchronous processing with failure recovery, and no permanent history:
 
-> **SUPERSEDED — actual implementation (see Decision log addendum):** as batch
-> durability requirements grew, the HTTP batch path moved to **Option C**:
-> `POST /api/batches` → persistent batch state in SQLite → BullMQ + Redis job
-> carrying `{ batchId }` only → worker with **chunk checkpoints**
-> (`PENDING → PROCESSING → DONE`, atomic claim, lease recovery, bulk persist
-> via `persistChunkAndMarkDone`) → progress/results API. The pure
-> `processBatch()` helper above remains as unit-tested domain logic, but it is
-> no longer wired into any HTTP route — the worker is the single runtime
-> batch implementation. Mental model: **Redis/BullMQ = durable work
-> ("what needs to happen"), database = durable batch/application state and
-> results ("what happened"), chunk checkpoints = recovery optimization
-> (skip DONE work, recompute at most the unfinished chunk), parcel-level
-> `UNIQUE(batch_id, parcel_id)` = final idempotency safeguard. Worker chunk
-> size defaults to `BATCH_CHUNK_SIZE` (500) with lease `CHUNK_LEASE_MS`
-> (5 min, matching the BullMQ lock duration).
+- `POST /api/batches` → validate → verify Redis → create temporary Redis state
+  (meta + input + `PENDING` chunk checkpoints, all TTL-expired) → BullMQ job
+  carrying `{ batchId }` only → `202`
+- Worker atomically claims one chunk at a time (`SET lock NX PX`, only one
+  winner; stale locks expire and are reclaimable), routes it through the
+  shared domain core, and checkpoints (parcel results via `HSETNX` +
+  chunk `DONE` + TTL refresh) in one `MULTI/EXEC` unit
+- Progress derives from checkpoint state, so retries never double-count;
+  parcel-level `HSETNX` is the final idempotency safeguard
+- No database, no authentication, no permanent batch listing: the API is
+  anonymous and state expires (`BATCH_TTL_SECONDS`, default 24h)
+
+Earlier iterations used Option B (chunked synchronous `processBatch()`); that
+helper has been removed so only ONE batch implementation exists. Mental model:
+**BullMQ = durable work ("what needs to happen"), Redis batch state =
+temporary progress/results ("what happened", TTL-expired).** Duplicate
+computation is minimized but not mathematically eliminated under a crash
+occurring between computation and checkpoint.
 
 ### Key Implementation Details
-- `processBatch()` in `batchProcessor.js` accepts an `onProgress` callback
-- Each parcel is validated and routed independently (mixed-validity handling)
-- The `sanitizeInput()` function prevents huge payloads in error responses
-- `validateBatchInput()` rejects batches over 10,000 parcels as a safety limit
+- `POST /api/batches` validates the envelope (incl. duplicate parcel IDs), then `enqueueBatch()` verifies Redis, applies backpressure, creates TTL state, and enqueues; queue failure deletes the temporary state and returns 503
+- The worker (`worker.js`) claims/releases/checkpoints via `batchStore.js`; chunk size defaults to `BATCH_CHUNK_SIZE` (500), lease `CHUNK_LEASE_MS` (5 min, matching the BullMQ lock duration)
+- Each parcel is validated and routed independently (mixed-validity handling → `COMPLETED_WITH_ERRORS`, never a silent drop)
+- `validateBatchInput()` rejects batches over 10,000 parcels as a safety limit; results pages are capped (`RESULTS_MAX_LIMIT`) and the UI paginates
 
 ### Interview Talking Points
-- "I chose chunked processing because the spec explicitly says not to build a job queue platform."
-- "The `setImmediate()` yield is a real Node.js pattern — it prevents event loop starvation for long batches."
-- "If batch sizes grow beyond 10MB, the next step would be streaming the JSON parser, but that's not needed at current scale."
+- "The queue owns the work and Redis owns temporary state — both expire, because the flow ends at result display, not permanent history."
+- "Checkpointing bounds recomputation to the unfinished chunk; HSETNX idempotency keeps results correct under retry."
+- "No auth, no database: the assessment defines no users and no history requirement, so anonymous access plus rate limits, validation, and request limits is the honest, minimal security model."
 
 ---
 
@@ -627,7 +627,11 @@ The spec requires: "Design batch processing so large files do not unnecessarily 
 
 ### Context & Problem Statement
 
-Phase 5 requires demonstrating how to safely add a new rule (`Value > €5000 → Manual Review`) using a realistic Git workflow.
+Demonstrating how to safely evolve business rules using a realistic Git workflow.
+The original assessment requires only one approval rule (`value > €1000 → Insurance`);
+`Value > €5000 → Manual Review` below is a **deliberate demonstration rule** showing
+that new rules can be added without touching the engine — it is NOT presented as an
+original requirement.
 
 ### Workflow Executed
 

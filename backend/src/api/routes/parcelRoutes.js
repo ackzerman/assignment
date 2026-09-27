@@ -14,10 +14,7 @@ const express = require('express');
 const { randomUUID } = require('crypto');
 const { validateParcelInput, getValidCountryCodes } = require('../../domain/validation');
 const { routeParcel } = require('../../domain/routingEngine');
-const { validateBatchInput } = require('../../domain/batchProcessor');
-const { enqueueBatch } = require('./batchRoutes');
-const { authOptional } = require('../middleware/auth');
-const { ValidationFailedError, AppError } = require('../../errors/AppError');
+const { ValidationFailedError } = require('../../errors/AppError');
 const { logger } = require('../../observability/logger');
 const { recordRouting, recordFailure, recordProcessingTime } = require('../../observability/metrics');
 
@@ -139,45 +136,6 @@ router.get('/countries', (_req, res) => {
       countries: getValidCountryCodes(),
     },
   });
-});
-
-/**
- * POST /api/parcels/batch — LEGACY compatibility alias (async).
- *
- * Historically this endpoint processed batches synchronously in the request.
- * It now reuses the canonical asynchronous creation path (same validation,
- * same DB record, same BullMQ job as POST /api/batches) so only ONE batch
- * implementation exists. Returns 202; poll GET /api/batches/:batchId.
- */
-router.post('/batch', authOptional, async (req, res, next) => {
-  try {
-    const batchValidation = validateBatchInput(req.body);
-    if (!batchValidation.valid) {
-      logger.warn('Batch validation failed', {
-        requestId: req.id,
-        operation: 'batch_process_legacy',
-        error: batchValidation.error,
-      });
-      throw new AppError(batchValidation.error, 400);
-    }
-
-    const owner = req.user?.id || 'anonymous';
-    const created = await enqueueBatch(batchValidation.parcels, {
-      owner,
-      requestId: req.id,
-    });
-
-    res.status(202).json({
-      status: 'accepted',
-      data: {
-        ...created,
-        message: `Batch ${created.batchId} has been accepted for processing. Use GET /api/batches/${created.batchId} to track progress.`,
-      },
-    });
-  } catch (error) {
-    if (error.statusCode === 429) res.setHeader('Retry-After', '30');
-    next(error);
-  }
 });
 
 module.exports = router;

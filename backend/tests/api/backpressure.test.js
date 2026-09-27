@@ -1,5 +1,5 @@
 /**
- * Backpressure test (Master: incoming rate vs worker rate, refuse when piled up).
+ * Backpressure test: refuse when durable work piles up.
  */
 
 jest.mock('../../src/infrastructure/queue', () => {
@@ -11,19 +11,20 @@ jest.mock('../../src/infrastructure/queue', () => {
   };
 });
 
+const RedisMock = require('ioredis-mock');
+const redis = require('../../src/infrastructure/redis');
 const request = require('supertest');
-const { initDatabase, closeDatabase } = require('../../src/infrastructure/database');
 
 describe('Backpressure', () => {
   let app;
 
   beforeAll(() => {
-    initDatabase(':memory:');
+    redis.setRedisImplementation(RedisMock);
     app = require('../../src/app');
   });
 
-  afterAll(() => {
-    closeDatabase();
+  afterAll(async () => {
+    await redis.closeRedis();
   });
 
   it('returns 429 with Retry-After when queue depth exceeds max', async () => {

@@ -4,10 +4,9 @@
  * Centralizes all backend API calls. The frontend never constructs
  * URLs or fetch options directly — it calls these functions.
  *
- * Single parcel: POST /api/parcels (canonical, Master Phase 3) — synchronous 200.
- * Batch: POST /api/batches (Master Phase 4) — async 202, then poll status/results.
- * Legacy aliases (/api/parcels/route, /api/parcels/batch) are still supported
- * by the backend for backward compatibility.
+ * Single parcel: POST /api/parcels — synchronous 200.
+ * Batch: POST /api/batches — async 202, then poll status/results.
+ * Batch state and results are temporary Redis state (TTL-expired).
  */
 
 const API_BASE = '/api';
@@ -109,7 +108,8 @@ export async function pollBatchStatus(batchId, options = {}) {
 }
 
 /**
- * Fetches persisted batch results (Master: DB is source of truth).
+ * Fetches temporary batch results (active processing session, Redis-backed).
+ * Results are paginated server-side; the UI loads one page at a time.
  */
 export async function fetchBatchResults(batchId, { limit, offset } = {}) {
   const params = new URLSearchParams();
@@ -125,30 +125,8 @@ export async function fetchBatchResults(batchId, { limit, offset } = {}) {
 }
 
 /**
- * Legacy synchronous batch (kept for backward compatibility).
- * Prefer createBatch + pollBatchStatus for new code.
- *
- * @param {Array} parcels - Array of parcel data objects
- * @returns {Promise<object>} - Batch result with summary and individual results
- */
-export async function routeBatch(parcels) {
-  const response = await fetch(`${API_BASE}/parcels/batch`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ parcels }),
-  });
-
-  const data = await parseJsonSafe(response);
-
-  if (!response.ok) {
-    throw toApiError(data, response);
-  }
-
-  return data;
-}
-
-/**
  * Fetches the list of valid country codes for the dropdown.
+ * Full ISO 3166-1 alpha-2 set, served by the backend.
  *
  * @returns {Promise<string[]>} - Sorted array of ISO 3166-1 alpha-2 codes
  */

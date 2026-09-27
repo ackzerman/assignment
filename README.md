@@ -1,14 +1,15 @@
 # Parcel Routing System
 
-An internal parcel routing system that processes parcels and routes them to the appropriate department based on configurable business rules.
+A public parcel routing system that processes parcels and routes them to the appropriate department based on configurable business rules. No user accounts: single parcels route synchronously, batches process asynchronously via BullMQ + Redis with temporary (TTL-expired) state.
 
 > 📘 **Comprehensive Architectural & Engineering Decisions**: For an in-depth breakdown of every design decision, trade-off matrix, alternatives considered, and interview talking points, see [ENGINEERING_DECISIONS.md](./ENGINEERING_DECISIONS.md).
 
 ## Tech Stack
 
 - **Backend:** Node.js + Express (JavaScript)
+- **Queue + temporary state:** BullMQ + Redis (`ioredis`)
 - **Frontend:** React + Vite (JavaScript)
-- **Testing:** Jest (72 tests passing, 100% domain boundary coverage)
+- **Testing:** Jest (backend suite, Redis state via `ioredis-mock`)
 
 ## Project Structure
 
@@ -18,22 +19,27 @@ assignment/
 │   ├── src/
 │   │   ├── domain/           # Pure business logic (zero framework dependencies)
 │   │   │   ├── parcel.js     # Parcel domain model documentation
-│   │   │   ├── validation.js # Input validation logic & country code set
+│   │   │   ├── validation.js # Input validation logic & full ISO country set
 │   │   │   ├── rules.js      # Business rules configuration (departments & approvals)
-│   │   │   └── routingEngine.js # Pure evaluation engine
+│   │   │   ├── routingEngine.js # Pure evaluation engine
+│   │   │   └── batchProcessor.js # Batch envelope validation (no runtime processing)
 │   │   ├── errors/           # Custom error classes
 │   │   │   └── AppError.js   # AppError, ValidationFailedError
+│   │   ├── infrastructure/   # Queue + worker + Redis state
+│   │   │   ├── queue.js      # BullMQ queue (payloads are { batchId } only)
+│   │   │   ├── redis.js      # Shared Redis client (lazy connect, env config)
+│   │   │   ├── batchStore.js # Temporary batch state: checkpoints + results (TTL)
+│   │   │   └── worker.js     # BullMQ consumer: claim chunk → route → checkpoint
 │   │   ├── api/
 │   │   │   ├── routes/       # Express route handlers (thin HTTP layer)
-│   │   │   │   └── parcelRoutes.js
-│   │   │   └── middleware/   # Centralized error handling
+│   │   │   │   ├── parcelRoutes.js # Single-parcel endpoints
+│   │   │   │   └── batchRoutes.js  # Async batch endpoints (single implementation)
+│   │   │   └── middleware/   # Security, logging, error handling (no auth)
+│   │   ├── observability/    # Structured logs, metrics, anomaly detection
 │   │   ├── app.js            # Express app configuration (testable without server)
 │   │   └── index.js          # Server entry point
-│   └── tests/
-│       └── domain/           # Unit tests for domain logic
-│           ├── validation.test.js    # 40 validation tests
-│           └── routingEngine.test.js # 32 routing engine & boundary tests
-├── frontend/                 # React + Vite UI
+│   └── tests/                # Jest suites (domain, batch, api, security, observability)
+├── frontend/                 # React + Vite UI (paginated batch results)
 ├── ENGINEERING_DECISIONS.md  # Comprehensive architecture decisions & trade-offs
 ├── MASTER_PROMPT.md          # Technical assessment specification
 └── README.md
@@ -47,7 +53,7 @@ assignment/
 cd backend
 npm install
 npm run dev        # Start development server (port 3001)
-npm test           # Run 167 automated tests
+npm test           # Run 195 automated tests
 ```
 
 ### Frontend
@@ -63,23 +69,31 @@ npm run dev        # Start development server (port 5173)
 | Method | Endpoint | Meaning |
 |---|---|---|
 | `POST` | `/api/parcels` | Single parcel, sync, `200` + `{ parcelId, department, approvals, matchedRules, reasons }` |
-| `POST` | `/api/batches` | Create batch, async, `202` + `{ batchId, status: QUEUED }` |
-| `GET` | `/api/batches/:batchId` | Poll progress `{ status, total, processed, successful, failed, progress }` |
-| `GET` | `/api/batches/:batchId/results` | Persisted results (paginated `?limit&offset`) |
+| `POST` | `/api/batches` | Create batch, async, `202` + `{ batchId, status: QUEUED }` (full-UUID `BATCH-<uuid>`) |
+| `GET` | `/api/batches/:batchId` | Poll progress `{ status, total, processed, successful, failed, progress }` (404 when unknown/expired) |
+| `GET` | `/api/batches/:batchId/results` | Temporary results, paginated (`?limit&offset`, limit capped server-side) |
 | `GET` | `/health/live` | Liveness: is the process alive? |
-| `GET` | `/health/ready` | Readiness: DB + queue reachable? |
+| `GET` | `/health/ready` | Readiness: Redis + queue reachable? |
 | `GET` | `/api/metrics` | Counters: HTTP, routing, jobs, queue depth, latencies |
 
-Legacy aliases kept: `POST /api/parcels/route` (single), `POST /api/parcels/batch` (async alias of `POST /api/batches`, returns `202`).
+Legacy alias kept: `POST /api/parcels/route` (single). There is exactly one batch implementation (`POST /api/batches` → BullMQ → worker).
 
 ## Configuration (`backend/.env.example`)
 
-- `API_TOKENS` — optional Bearer tokens; when set, batches are owned and cross-owner reads → `403`.
+- `REDIS_URL` (preferred) or `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` — BullMQ queue + temporary batch state. Redis is never publicly exposed (localhost/private network + password in production).
+- `BATCH_TTL_SECONDS` (default `86400`) — temporary batch state lifetime; no permanent batch history is retained.
+- `RESULTS_MAX_LIMIT` (default `1000`) — max results per results request; the UI paginates.
 - `MAX_QUEUE_DEPTH` (default `100`) — backpressure limit; over-limit `POST /api/batches` → `429 + Retry-After`.
-- `REDIS_HOST` / `REDIS_PORT` — BullMQ durable queue; retries `3` with exponential backoff `1s→2s→4s`.
 - `BATCH_CHUNK_SIZE` (default `500`) — parcels per worker recovery checkpoint.
 - `CHUNK_LEASE_MS` (default `300000`) — chunk claim lease; stale `PROCESSING` chunks become reclaimable after expiry.
-- Queue payload is `{ batchId }` only; worker loads data from DB. Results protected by `UNIQUE(batch_id, parcel_id)` (final idempotency safeguard); chunk checkpoints (`PENDING → PROCESSING → DONE`) are the recovery optimization. **Redis/BullMQ = durable work, database = durable state and results.**
+
+Mental model: **BullMQ = durable work ("what needs to happen"), Redis batch state = temporary progress/results ("what happened", TTL-expired).** Chunk checkpoints (`PENDING → PROCESSING → DONE`, atomic `SET NX PX` claim) are the recovery optimization — retries skip `DONE` work. Parcel-level `HSETNX` result writes are the final idempotency safeguard. Duplicate computation is minimized but not mathematically eliminated under a crash occurring between computation and checkpoint.
+
+## Business Rules
+
+- Departments: `weight ≤ 1kg → Mail`, `≤ 10kg → Regular`, `> 10kg → Heavy` (first match wins).
+- Original requirement: `value > €1000 → Insurance` approval.
+- Additional demonstration rule (safe-evolution example, not an original requirement): `value > €5000 → Manual Review`. See `ENGINEERING_DECISIONS.md` Decision 15.
 
 ## Core Architecture Decisions Summary
 

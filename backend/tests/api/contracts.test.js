@@ -1,11 +1,11 @@
 /**
- * API contract tests (Master Phase: API contracts).
+ * API contract tests.
  *
  * Canonical endpoints:
  *   POST /api/parcels → 200 + explainable result
- *   POST /api/batches → 202 + batchId/QUEUED
- *   GET  /api/batches/:id → status/progress
- *   GET  /api/batches/:id/results → persisted results
+ *   POST /api/batches → 202 + full-UUID batchId/QUEUED
+ *   GET  /api/batches/:id → status/progress from temporary Redis state
+ *   GET  /api/batches/:id/results → paginated results
  */
 
 jest.mock('../../src/infrastructure/queue', () => {
@@ -17,23 +17,20 @@ jest.mock('../../src/infrastructure/queue', () => {
   };
 });
 
+const RedisMock = require('ioredis-mock');
+const redis = require('../../src/infrastructure/redis');
 const request = require('supertest');
-
-const {
-  initDatabase,
-  closeDatabase,
-} = require('../../src/infrastructure/database');
 
 let app;
 
 describe('API contracts', () => {
   beforeAll(() => {
-    initDatabase(':memory:');
+    redis.setRedisImplementation(RedisMock);
     app = require('../../src/app');
   });
 
-  afterAll(() => {
-    closeDatabase();
+  afterAll(async () => {
+    await redis.closeRedis();
   });
 
   it('POST /api/parcels returns master explainable shape', async () => {
@@ -50,17 +47,17 @@ describe('API contracts', () => {
     expect(res.body.data.reasons.length).toBeGreaterThan(0);
   });
 
-  it('POST /api/batches returns 202 with batchId and QUEUED status', async () => {
+  it('POST /api/batches returns 202 with a full-UUID batchId and QUEUED status', async () => {
     const res = await request(app)
       .post('/api/batches')
       .send({ parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] });
 
     expect(res.status).toBe(202);
-    expect(res.body.data.batchId).toMatch(/^BATCH-/);
+    expect(res.body.data.batchId).toMatch(/^BATCH-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(res.body.data.status).toBe('QUEUED');
   });
 
-  it('GET /api/batches/:id reflects DB durable state', async () => {
+  it('GET /api/batches/:id reflects temporary Redis state', async () => {
     const created = await request(app)
       .post('/api/batches')
       .send({ parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] });
@@ -71,6 +68,35 @@ describe('API contracts', () => {
     expect(res.body.data.batchId).toBe(batchId);
     expect(res.body.data.total).toBe(1);
     expect(typeof res.body.data.progress).toBe('number');
+  });
+
+  it('GET /api/batches/:id/results paginates with limit/offset', async () => {
+    const parcels = Array.from({ length: 5 }, (_, i) => ({
+      weight: 1, value: 10, destinationCountry: 'DE', parcelId: `P${i + 1}`,
+    }));
+    const created = await request(app)
+      .post('/api/batches')
+      .send({ parcels });
+    const batchId = created.body.data.batchId;
+
+    // Drive the worker directly against Redis state (no live BullMQ here).
+    const { processBatchJob } = require('../../src/infrastructure/worker');
+    await processBatchJob({ id: 'job-contracts', data: { batchId }, updateProgress: async () => {} });
+
+    const page1 = await request(app).get(`/api/batches/${batchId}/results?limit=2&offset=0`);
+    expect(page1.status).toBe(200);
+    expect(page1.body.data.resultCount).toBe(5);
+    expect(page1.body.data.results).toHaveLength(2);
+    expect(page1.body.data.results[0].parcelId).toBe('P1');
+
+    const page3 = await request(app).get(`/api/batches/${batchId}/results?limit=2&offset=4`);
+    expect(page3.body.data.results).toHaveLength(1);
+    expect(page3.body.data.results[0].parcelId).toBe('P5');
+  });
+
+  it('GET unknown/expired batch returns 404', async () => {
+    const res = await request(app).get('/api/batches/BATCH-does-not-exist');
+    expect(res.status).toBe(404);
   });
 
   it('exposes retry config as exponential backoff with max attempts', () => {

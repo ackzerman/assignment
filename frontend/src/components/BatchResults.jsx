@@ -1,22 +1,24 @@
 /**
- * BatchResults — Displays batch processing results clearly.
+ * BatchResults — Displays batch processing results with pagination.
  *
  * Design Decisions:
  *
  * 1. SUMMARY FIRST — Show totals (successful/failed) prominently at the top.
  *    Operators need to know the overall health of the batch immediately.
  *
- * 2. TABULAR RESULTS — Individual results shown in a scannable table.
- *    Each row shows status, department, and errors at a glance.
+ * 2. PAGINATED TABLE — Only one page of rows (200) is ever in the DOM, so a
+ *    10,000-parcel batch is fully inspectable via Prev/Next without loading
+ *    huge result lists into the DOM at once. Pages load progressively from
+ *    GET /api/batches/:batchId/results?limit=&offset=.
  *
- * 3. FILTER CONTROLS — Operators can filter to see only failed parcels
- *    to fix issues, or only successful ones to confirm routing.
+ * 3. FILTER CONTROLS — Operate on the loaded page ( counts shown per page ).
  *
  * 4. COLLAPSIBLE DETAILS — Error details are shown inline but don't
  *    overwhelm the view when there are many results.
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { fetchBatchResults } from '../api';
 
 // Department display colors (same as RoutingResult)
 const DEPT_COLORS = {
@@ -25,14 +27,46 @@ const DEPT_COLORS = {
   Heavy: '#f59e0b',
 };
 
+const PAGE_SIZE = 200;
+
 export default function BatchResults({ data }) {
   const [filter, setFilter] = useState('all'); // 'all' | 'routed' | 'invalid'
   const [expandedRows, setExpandedRows] = useState(new Set());
+  // Page state (rows/loading/error travel together; remount via key resets per batch).
+  const [pageState, setPageState] = useState(() => ({
+    page: 0,
+    rows: [],
+    loading: !!(data?.batch?.batchId && !data?.results),
+    error: null,
+  }));
+
+  const batch = data?.batch || null;
+  const batchId = batch?.batchId || null;
+  const resultCount = typeof data?.resultCount === 'number' ? data.resultCount : 0;
+  const pageCount = Math.max(1, Math.ceil(resultCount / PAGE_SIZE));
+
+  // Support the legacy embedded shape { summary, results } if ever passed.
+  const legacyRows = Array.isArray(data?.results) ? data.results : null;
+
+  useEffect(() => {
+    if (!batchId || legacyRows) return;
+    let cancelled = false;
+    fetchBatchResults(batchId, { limit: PAGE_SIZE, offset: pageState.page * PAGE_SIZE }).then(
+      (payload) => {
+        if (cancelled) return;
+        setPageState((s) => ({ ...s, rows: payload.results || [], loading: false, error: null }));
+        setExpandedRows(new Set());
+      },
+      (err) => {
+        if (cancelled) return;
+        setPageState((s) => ({ ...s, rows: [], loading: false, error: err.message || 'Failed to load results page.' }));
+      },
+    );
+    return () => { cancelled = true; };
+  }, [batchId, pageState.page, legacyRows]);
 
   if (!data) return null;
 
-  // Support both legacy sync shape { summary, results } and async shape { batch, results }.
-  const batch = data.batch || null;
   const summary = data.summary || (batch
     ? {
         total: batch.total,
@@ -41,9 +75,11 @@ export default function BatchResults({ data }) {
         processedAt: batch.completedAt || batch.createdAt,
       }
     : { total: 0, successful: 0, failed: 0 });
-  const results = data.results || [];
+  const results = legacyRows || pageState.rows;
+  const { page, loading } = pageState;
+  const loadError = pageState.error;
 
-  // Apply filter
+  // Apply filter to the loaded page
   const filteredResults = results.filter((r) => {
     if (filter === 'all') return true;
     if (filter === 'routed') return r.status === 'routed';
@@ -61,12 +97,19 @@ export default function BatchResults({ data }) {
     setExpandedRows(next);
   }
 
-  // Count departments for the summary breakdown
+  // Department breakdown for the loaded page
   const deptCounts = {};
   for (const r of results) {
     if (r.status === 'routed' && r.department) {
       deptCounts[r.department] = (deptCounts[r.department] || 0) + 1;
     }
+  }
+
+  function goToPage(next) {
+    const clamped = Math.min(Math.max(0, next), pageCount - 1);
+    if (clamped === pageState.page) return;
+    // Event handler (not an effect): safe to flag loading synchronously.
+    setPageState((s) => ({ ...s, page: clamped, loading: true, error: null }));
   }
 
   return (
@@ -98,10 +141,10 @@ export default function BatchResults({ data }) {
         </div>
       </div>
 
-      {/* Department Breakdown */}
+      {/* Department Breakdown (current page) */}
       {Object.keys(deptCounts).length > 0 && (
         <div className="dept-breakdown">
-          <span className="dept-breakdown-label">Department breakdown:</span>
+          <span className="dept-breakdown-label">Department breakdown (current page):</span>
           {Object.entries(deptCounts).map(([dept, count]) => (
             <span
               key={dept}
@@ -114,7 +157,7 @@ export default function BatchResults({ data }) {
         </div>
       )}
 
-      {/* Filter Controls */}
+      {/* Filter Controls (current page) */}
       <div className="batch-filters">
         <button
           className={`filter-btn ${filter === 'all' ? 'active' : ''}`}
@@ -126,17 +169,23 @@ export default function BatchResults({ data }) {
           className={`filter-btn ${filter === 'routed' ? 'active' : ''}`}
           onClick={() => setFilter('routed')}
         >
-          ✓ Routed ({summary.successful})
+          ✓ Routed ({results.filter((r) => r.status === 'routed').length})
         </button>
         <button
           className={`filter-btn ${filter === 'invalid' ? 'active' : ''}`}
           onClick={() => setFilter('invalid')}
         >
-          ✗ Failed ({summary.failed})
+          ✗ Failed ({results.filter((r) => r.status !== 'routed').length})
         </button>
       </div>
 
-      {/* Results Table */}
+      {loadError && (
+        <div className="batch-parse-error">
+          <p>⚠️ {loadError}</p>
+        </div>
+      )}
+
+      {/* Results Table (one page in the DOM at a time) */}
       <div className="batch-table-wrapper">
         <table className="batch-table">
           <thead>
@@ -194,6 +243,12 @@ export default function BatchResults({ data }) {
         </table>
       </div>
 
+      {loading && <p>Loading results…</p>}
+
+      {!loading && !legacyRows && resultCount === 0 && (
+        <p className="na-text">No results stored for this batch.</p>
+      )}
+
       {/* Expanded detail panels (shown below table for selected rows) */}
       {filteredResults
         .filter((r) => expandedRows.has(r.index))
@@ -208,13 +263,13 @@ export default function BatchResults({ data }) {
                   <span className="detail-key">Department:</span>
                   <span>{r.department}</span>
                   <span className="detail-key">Reason:</span>
-                  <span className="reason-text">{r.departmentReason}</span>
+                  <span className="reason-text">{r.departmentReason || (r.reasons && r.reasons[0]) || '—'}</span>
                   <span className="detail-key">Weight:</span>
-                  <span>{r.parcel.weight} kg</span>
+                  <span>{(r.parcel || r.inputSummary)?.weight ?? '—'} kg</span>
                   <span className="detail-key">Value:</span>
-                  <span>€{r.parcel.value.toLocaleString()}</span>
+                  <span>€{((r.parcel || r.inputSummary)?.value ?? 0).toLocaleString()}</span>
                   <span className="detail-key">Country:</span>
-                  <span>{r.parcel.destinationCountry}</span>
+                  <span>{(r.parcel || r.inputSummary)?.destinationCountry || '—'}</span>
                 </div>
                 {r.approvals && r.approvals.length > 0 && (
                   <div className="detail-approvals">
@@ -246,6 +301,29 @@ export default function BatchResults({ data }) {
             )}
           </div>
         ))}
+
+      {/* Pagination */}
+      {!legacyRows && resultCount > 0 && (
+        <div className="batch-filters">
+          <button
+            className="filter-btn"
+            onClick={() => goToPage(page - 1)}
+            disabled={page === 0 || loading}
+          >
+            ← Prev
+          </button>
+          <span className="na-text">
+            Page {page + 1} of {pageCount} · {resultCount.toLocaleString()} total results
+          </span>
+          <button
+            className="filter-btn"
+            onClick={() => goToPage(page + 1)}
+            disabled={page >= pageCount - 1 || loading}
+          >
+            Next →
+          </button>
+        </div>
+      )}
 
       {/* Metadata */}
       <div className="result-meta">

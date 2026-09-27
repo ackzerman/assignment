@@ -1,9 +1,10 @@
 /**
- * Batch creation paths: legacy alias behavior + queue-failure window.
+ * Batch creation paths: canonical creation + Redis/queue failure window.
  *
- * - POST /api/parcels/batch is an async alias of POST /api/batches (202).
- * - DB success + queue failure marks the batch FAILED (never falsely QUEUED)
- *   and returns 503.
+ * - POST /api/batches validates, creates temporary Redis state, enqueues.
+ * - Redis down → 503 before anything is created.
+ * - Queue failure after state creation → temporary state is deleted
+ *   (never a falsely QUEUED batch) and the API returns 503.
  */
 
 jest.mock('../../src/infrastructure/queue', () => {
@@ -15,24 +16,22 @@ jest.mock('../../src/infrastructure/queue', () => {
   };
 });
 
+const RedisMock = require('ioredis-mock');
+const redis = require('../../src/infrastructure/redis');
 const request = require('supertest');
 const queue = require('../../src/infrastructure/queue');
-const {
-  initDatabase,
-  closeDatabase,
-  getBatch,
-} = require('../../src/infrastructure/database');
+const store = require('../../src/infrastructure/batchStore');
 
 let app;
 
 describe('Batch creation paths', () => {
   beforeAll(() => {
-    initDatabase(':memory:');
+    redis.setRedisImplementation(RedisMock);
     app = require('../../src/app');
   });
 
-  afterAll(() => {
-    closeDatabase();
+  afterAll(async () => {
+    await redis.closeRedis();
     jest.restoreAllMocks();
   });
 
@@ -43,24 +42,23 @@ describe('Batch creation paths', () => {
     queue.getQueueHealth.mockResolvedValue({ connected: false, error: 'mock' });
   });
 
-  it('legacy POST /api/parcels/batch is an async alias returning 202', async () => {
+  it('canonical POST /api/batches creates Redis state and returns 202', async () => {
     const res = await request(app)
-      .post('/api/parcels/batch')
+      .post('/api/batches')
       .send({ parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] });
 
     expect(res.status).toBe(202);
     expect(res.body.status).toBe('accepted');
-    expect(res.body.data.batchId).toMatch(/^BATCH-/);
-    expect(res.body.data.status).toBe('QUEUED');
 
-    const batch = getBatch(res.body.data.batchId);
+    const batch = await store.getBatchState(res.body.data.batchId);
     expect(batch).not.toBeNull();
     expect(batch.total).toBe(1);
+    expect(batch.status).toBe('QUEUED');
   });
 
-  it('legacy alias rejects duplicate parcel IDs like the canonical path', async () => {
+  it('rejects duplicate parcel IDs like before', async () => {
     const res = await request(app)
-      .post('/api/parcels/batch')
+      .post('/api/batches')
       .send({
         parcels: [
           { weight: 1, value: 10, destinationCountry: 'DE', parcelId: 'P1' },
@@ -72,20 +70,45 @@ describe('Batch creation paths', () => {
     expect(res.body.message).toContain('Duplicate parcelId');
   });
 
-  it('queue failure after DB creation marks the batch FAILED and returns 503', async () => {
+  it('queue failure after state creation deletes state and returns 503', async () => {
     queue.addBatchJob.mockRejectedValueOnce(new Error('redis down'));
+    const deleted = [];
+    const realDelete = store.deleteBatch.bind(store);
+    jest.spyOn(store, 'deleteBatch').mockImplementation(async (batchId) => {
+      deleted.push(batchId);
+      return realDelete(batchId);
+    });
 
     const res = await request(app)
       .post('/api/batches')
       .send({ parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] });
 
     expect(res.status).toBe(503);
+    // Temporary state was cleaned up: no falsely QUEUED batch lingers.
+    expect(deleted).toHaveLength(1);
+    expect(deleted[0]).toMatch(/^BATCH-/);
+    expect(await store.getBatchState(deleted[0])).toBeNull();
+  });
 
-    // The batch must not be left falsely QUEUED.
-    const { listBatches } = require('../../src/infrastructure/database');
-    const failed = listBatches({ status: 'FAILED', limit: 10 });
-    expect(failed.length).toBeGreaterThan(0);
-    const batch = getBatch(failed[0].batchId);
-    expect(batch.error).toContain('Queue submission failed');
+  it('Redis down fails fast with 503 before creating state', async () => {
+    const redisModule = require('../../src/infrastructure/redis');
+    jest.spyOn(redisModule, 'pingRedis').mockResolvedValue(false);
+
+    const res = await request(app)
+      .post('/api/batches')
+      .send({ parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] });
+
+    expect(res.status).toBe(503);
+  });
+
+  it('deleted temporary state reads as unknown (404)', async () => {
+    const created = await request(app)
+      .post('/api/batches')
+      .send({ parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] });
+    const batchId = created.body.data.batchId;
+    await store.deleteBatch(batchId);
+
+    const res = await request(app).get(`/api/batches/${batchId}`);
+    expect(res.status).toBe(404);
   });
 });

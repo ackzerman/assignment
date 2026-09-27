@@ -12,24 +12,37 @@
  * - Well-tested in production environments
  *
  * CRITICAL: The queue payload is SMALL — just { batchId }.
- * The worker retrieves the actual parcel data from the database.
+ * The worker loads the batch input from temporary Redis state.
  * This keeps queue messages lightweight and enables durable recovery.
  *
- * Queue vs Database mental model:
+ * Redis mental model:
  * - Queue: "What work needs to happen?"
- * - Database: "What happened / what is the current state?"
+ * - Redis batch state: "What happened / what is the current state?"
+ * Both expire: jobs are retained briefly, batch keys carry a TTL.
  */
 
 const { Queue, Worker, QueueEvents } = require('bullmq');
 const { logger } = require('../observability/logger');
 
-// Redis connection configuration
-// In production, use REDIS_URL environment variable
-const DEFAULT_REDIS_CONFIG = {
-  host: process.env.REDIS_HOST || '127.0.0.1',
-  port: parseInt(process.env.REDIS_PORT || '6379', 10),
-  maxRetriesPerRequest: null, // Required by BullMQ
-};
+// Redis connection configuration.
+// REDIS_URL is preferred (supports password/TLS params); otherwise host/port.
+// Credentials come from environment only — Redis itself is never publicly exposed.
+function getRedisConnection() {
+  if (process.env.REDIS_URL) {
+    return process.env.REDIS_URL;
+  }
+  const connection = {
+    host: process.env.REDIS_HOST || '127.0.0.1',
+    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    maxRetriesPerRequest: null, // Required by BullMQ
+  };
+  if (process.env.REDIS_PASSWORD) {
+    connection.password = process.env.REDIS_PASSWORD;
+  }
+  return connection;
+}
+
+const DEFAULT_REDIS_CONFIG = getRedisConnection();
 
 const QUEUE_NAME = 'batch-processing';
 
@@ -80,7 +93,7 @@ function initQueue(redisConfig) {
 
   logger.info('Queue initialized', {
     name: QUEUE_NAME,
-    redis: `${connection.host}:${connection.port}`,
+    redis: typeof connection === 'string' ? 'REDIS_URL' : `${connection.host}:${connection.port}`,
   });
 
   return queue;
@@ -89,7 +102,7 @@ function initQueue(redisConfig) {
 /**
  * Adds a batch processing job to the queue.
  * The payload is intentionally small — just the batchId.
- * The worker retrieves batch data from the database.
+ * The worker loads the batch input from temporary Redis state.
  *
  * @param {string} batchId - The batch ID to process
  * @param {object} [options] - Additional job options
