@@ -136,14 +136,81 @@ describe('BatchResults approvals (generic, data-driven)', () => {
     await waitFor(() => expect(screen.getAllByText('Required')).toHaveLength(1));
   });
 
-  it('shows status in the heading and the UUID only as a secondary reference', async () => {
+  it('COMPLETED displays the operator completion line without UUID', async () => {
     fetchBatchResults.mockResolvedValue({ results: [], resultCount: 0 });
     const { container } = render(<BatchResults data={{ batch, resultCount: 0 }} />);
 
-    const metaText = container.querySelector('.batch-meta').textContent;
-    expect(metaText).toContain('Batch COMPLETED');
-    expect(metaText).toContain('Batch reference: BATCH-1');
-    // Raw UUID is not the prominent heading.
-    expect(metaText).not.toContain('Batch BATCH-1');
+    expect(screen.getByText('Batch completed · 100%')).toBeTruthy();
+    expect(container.textContent).not.toContain('BATCH-1');
+    expect(container.textContent).not.toContain('COMPLETED_WITH_ERRORS');
+  });
+
+  it('COMPLETED_WITH_ERRORS displays the same operator line, never the internal string', async () => {
+    fetchBatchResults.mockResolvedValue({ results: [], resultCount: 0 });
+    const errorBatch = { ...batch, status: 'COMPLETED_WITH_ERRORS', successful: 1, failed: 1 };
+    const { container } = render(<BatchResults data={{ batch: errorBatch, resultCount: 0 }} />);
+
+    expect(screen.getByText('Batch completed · 100%')).toBeTruthy();
+    expect(container.textContent).not.toContain('COMPLETED_WITH_ERRORS');
+    expect(container.textContent).not.toContain('BATCH-1');
+    // The Failed summary card still communicates the errors.
+    const failedCard = container.querySelector('.summary-failed .summary-card-number');
+    expect(failedCard).toBeTruthy();
+    expect(failedCard.textContent).toBe('1');
+  });
+
+  it('FAILED still displays "Batch failed" with the Failed count, without UUID', async () => {
+    fetchBatchResults.mockResolvedValue({ results: [], resultCount: 0 });
+    const failedBatch = { ...batch, status: 'FAILED', error: 'Worker crashed' };
+    const { container } = render(<BatchResults data={{ batch: failedBatch, resultCount: 0 }} />);
+
+    expect(screen.getByText('Batch failed')).toBeTruthy();
+    expect(container.textContent).not.toContain('BATCH-1');
+    const failedCard = container.querySelector('.summary-failed .summary-card-number');
+    expect(failedCard).toBeTruthy();
+  });
+
+  it('FAILED without counts renders zeros instead of crashing', async () => {
+    fetchBatchResults.mockResolvedValue({ results: [], resultCount: 0 });
+    const bareBatch = { batchId: 'BATCH-9', status: 'FAILED', error: 'Worker crashed' };
+    const { container } = render(<BatchResults data={{ batch: bareBatch, resultCount: 0 }} />);
+
+    expect(screen.getByText('Batch failed')).toBeTruthy();
+    const numbers = [...container.querySelectorAll('.summary-card-number')].map((n) => n.textContent);
+    expect(numbers).toEqual(['0', '0', '0']);
+  });
+
+  it('invalid rows without error details render a fallback instead of crashing', async () => {
+    fetchBatchResults.mockResolvedValue({
+      results: [
+        {
+          parcelId: 'P1',
+          index: 0,
+          status: 'invalid',
+          errors: undefined,
+          inputSummary: { weight: -1, value: 10, destinationCountry: 'DE' },
+        },
+      ],
+      resultCount: 1,
+    });
+    render(<BatchResults data={{ batch, resultCount: 1 }} />);
+    const buttons = await screen.findAllByRole('button', { name: 'View' });
+    fireEvent.click(buttons[0]);
+    expect(await screen.findByText('No error details recorded for this parcel.')).toBeTruthy();
+  });
+
+  it('missing processedAt renders a neutral timestamp line', async () => {
+    fetchBatchResults.mockResolvedValue({ results: [], resultCount: 0 });
+    const timeless = { ...batch };
+    delete timeless.completedAt;
+    delete timeless.createdAt;
+    render(<BatchResults data={{ batch: timeless, resultCount: 0 }} />);
+    expect(await screen.findByText('Processed time unavailable')).toBeTruthy();
+  });
+
+  it('filter controls are labeled as current-page scope', async () => {
+    fetchBatchResults.mockResolvedValue({ results: [], resultCount: 0 });
+    render(<BatchResults data={{ batch, resultCount: 0 }} />);
+    expect(await screen.findByText('Filters (current page):')).toBeTruthy();
   });
 });

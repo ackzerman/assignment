@@ -137,4 +137,27 @@ describe('Strict pagination validation', () => {
       expect(res.status).toBe(404);
     });
   });
+
+  describe('getBatchResults direct-call validation (single strict path)', () => {
+    const batchId = 'BATCH-PAGE-STRICT-1';
+
+    it.each([['100abc'], ['1.5'], ['-1'], ['0'], ['NaN'], ['']])(
+      'string limit %p → 400-style error, never reinterpreted',
+      async (limit) => {
+        await expect(store.getBatchResults(batchId, { limit })).rejects.toMatchObject({ statusCode: 400 });
+      },
+    );
+
+    it.each([['-1'], ['1.5'], ['abc']])(
+      'string offset %p → 400-style error',
+      async (offset) => {
+        await expect(store.getBatchResults(batchId, { offset })).rejects.toMatchObject({ statusCode: 400 });
+      },
+    );
+
+    it('already-parsed numbers pass through identically', async () => {
+      const rows = await store.getBatchResults(batchId, { limit: 2, offset: 1 });
+      expect(rows.map((r) => r.parcelId)).toEqual(['P2', 'P3']);
+    });
+  });
 });

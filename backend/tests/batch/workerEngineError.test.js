@@ -59,4 +59,32 @@ describe('Worker routing-engine failure', () => {
     expect((await store.getChunk(batchId, 0)).status).toBe('PENDING');
     expect((await store.getBatchState(batchId)).status).toBe('PROCESSING');
   });
+
+  it('records a system error only when no retry remains (no retry-noise spike)', async () => {
+    resetMetrics();
+    const mkBatch = async (suffix) => {
+      const batchId = `BATCH-ENG-RETRY-${suffix}-${Date.now()}`;
+      await store.createBatchState(
+        batchId,
+        [
+          { weight: 2, value: 100, destinationCountry: 'DE', parcelId: 'P1' },
+          { weight: 2, value: 777, destinationCountry: 'DE', parcelId: 'P2' },
+        ],
+        2,
+      );
+      return batchId;
+    };
+
+    // First attempt of 3: will be retried → no system error recorded.
+    const batchA = await mkBatch('a');
+    const firstTry = { id: 'job-retry-1', data: { batchId: batchA }, updateProgress: jest.fn(async () => {}), attemptsMade: 0, opts: { attempts: 3 } };
+    await expect(processBatchJob(firstTry, { leaseMs: 60000 })).rejects.toThrow('engine bug');
+    expect(getMetrics().errors).toBe(0);
+
+    // Final attempt (attemptsMade 2 of 3): exhaustion → exactly one error.
+    const batchB = await mkBatch('b');
+    const lastTry = { id: 'job-retry-3', data: { batchId: batchB }, updateProgress: jest.fn(async () => {}), attemptsMade: 2, opts: { attempts: 3 } };
+    await expect(processBatchJob(lastTry, { leaseMs: 60000 })).rejects.toThrow('engine bug');
+    expect(getMetrics().errors).toBe(1);
+  });
 });

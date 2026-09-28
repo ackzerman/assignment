@@ -8,6 +8,7 @@ vi.mock('./api.js', () => ({
   createBatch: vi.fn(),
   pollBatchStatus: vi.fn(),
   fetchBatchResults: vi.fn(),
+  isAbortError: (err) => !!err && (err.name === 'AbortError' || err.code === 20),
 }));
 
 function uploadParcels(container) {
@@ -98,7 +99,7 @@ describe('BatchUpload duplicate submission guard', () => {
     expect(options.idempotencyKey.length).toBeGreaterThan(0);
   });
 
-  it('processing progress shows a generic title; UUID only as secondary reference', async () => {
+  it('processing renders only the circular indicator with percentage', async () => {
     let notifyProgress;
     vi.mocked(createBatch).mockResolvedValue({ batchId: 'BATCH-UUID-1234', status: 'QUEUED' });
     vi.mocked(pollBatchStatus).mockImplementation(
@@ -121,17 +122,23 @@ describe('BatchUpload duplicate submission guard', () => {
       status: 'PROCESSING',
       processed: 123,
       total: 500,
-      progress: 25,
+      progress: 47,
     });
-    expect(await screen.findByText('Batch Processing')).toBeTruthy();
-    expect(screen.getByText(/Status:/)).toBeTruthy();
-    // Raw UUID is secondary metadata only — never the primary title.
-    const reference = container.querySelector('.batch-reference');
-    expect(reference).toBeTruthy();
-    expect(reference.textContent).toContain('BATCH-UUID-1234');
-    const progressText = container.querySelector('.batch-progress').textContent;
-    expect(progressText).not.toMatch(/^Batch BATCH-/);
-    expect(progressText).toContain('123 / 500');
+    // Circular indicator with the percentage inside.
+    const ring = container.querySelector('.batch-progress-ring');
+    expect(ring).toBeTruthy();
+    expect(container.querySelector('.batch-progress-circle')).toBeTruthy();
+    expect(await screen.findByText('47%')).toBeTruthy();
+    // None of the technical metadata is displayed.
+    const text = ring.parentElement.textContent;
+    expect(text).not.toContain('BATCH-UUID-1234');
+    expect(text).not.toContain('Batch Processing');
+    expect(text).not.toContain('Status:');
+    expect(text).not.toContain('PROCESSING');
+    expect(text).not.toContain('123 / 500');
+    expect(text).not.toContain('Reference:');
+    expect(container.querySelector('progress')).toBeNull();
+    expect(container.querySelector('.batch-reference')).toBeNull();
   });
 
   it('advertises the 9 MB client ceiling (below the 10 MB server limit)', async () => {
@@ -240,5 +247,178 @@ describe('BatchUpload FileReader lifecycle', () => {
     instances[0].complete(JSON.stringify({ parcels: [] }));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('Clear during a pending read drops the late result', async () => {
+    const instances = installFakeReader();
+    const { container } = render(
+      <BatchUpload onBatchResult={vi.fn()} onError={vi.fn()} onClear={vi.fn()} />,
+    );
+
+    selectFile(container, new File(['pending'], 'a.json', { type: 'application/json' }));
+    expect(instances).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+
+    // Late read completion after reset is ignored: no parcels adopted.
+    instances[0].complete(JSON.stringify({ parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByRole('button', { name: /Process \d+ Parcel/ })).toBeNull();
+    expect(screen.queryByText(/Failed to/)).toBeNull();
+  });
+
+  it('uppercase .JSON extension is accepted', async () => {
+    const instances = installFakeReader();
+    const { container } = render(
+      <BatchUpload onBatchResult={vi.fn()} onError={vi.fn()} onClear={vi.fn()} />,
+    );
+
+    selectFile(
+      container,
+      new File([JSON.stringify({ parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] })], 'BATCH.JSON', {
+        type: 'application/json',
+      }),
+    );
+    instances[0].complete(JSON.stringify({ parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] }));
+    expect(await screen.findByRole('button', { name: /Process 1 Parcel/ })).toBeTruthy();
+    expect(screen.queryByText(/Please upload a JSON file/)).toBeNull();
+  });
+
+  it('rejected files reset the input so the same file can be re-selected', async () => {
+    const { container } = render(
+      <BatchUpload onBatchResult={vi.fn()} onError={vi.fn()} onClear={vi.fn()} />,
+    );
+    const input = container.querySelector('input[type="file"]');
+    const big = new File([new Uint8Array(9 * 1024 * 1024 + 1024)], 'big.json', {
+      type: 'application/json',
+    });
+    fireEvent.change(input, { target: { files: [big] } });
+    expect(await screen.findByText(/File is too large/)).toBeTruthy();
+    expect(input.value).toBe('');
+  });
+
+  it('malformed JSON never shows the adopted-file state', async () => {
+    const instances = installFakeReader();
+    const { container } = render(
+      <BatchUpload onBatchResult={vi.fn()} onError={vi.fn()} onClear={vi.fn()} />,
+    );
+
+    selectFile(container, new File(['{bad json'], 'bad.json', { type: 'application/json' }));
+    instances[0].complete('{bad json');
+    expect(await screen.findByText(/Failed to parse JSON/)).toBeTruthy();
+    // No green file chip, no process action for an unparsed file.
+    expect(container.querySelector('.drop-zone').className).not.toContain('has-file');
+    expect(screen.queryByRole('button', { name: /Process \d+ Parcel/ })).toBeNull();
+  });
+});
+
+describe('BatchUpload in-flight poll replacement', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+  beforeEach(() => {
+    vi.mocked(createBatch).mockReset();
+    vi.mocked(pollBatchStatus).mockReset();
+    vi.mocked(fetchBatchResults).mockReset();
+  });
+
+  function installFakeReader() {
+    const instances = [];
+    class FakeReader {
+      constructor() {
+        instances.push(this);
+        this.aborted = false;
+        this.onload = null;
+        this.onerror = null;
+        this.onabort = null;
+        this.error = null;
+      }
+      readAsText(file) {
+        this.file = file;
+      }
+      abort() {
+        this.aborted = true;
+        if (this.onabort) this.onabort();
+      }
+      complete(text) {
+        if (this.aborted) return;
+        if (this.onload) this.onload({ target: { result: text } });
+      }
+    }
+    vi.stubGlobal('FileReader', FakeReader);
+    return instances;
+  }
+
+  // Mirrors the real api.js: an aborted signal rejects the pending poll.
+  function mockSignalAwarePoll() {
+    vi.mocked(pollBatchStatus).mockImplementation(
+      (_batchId, { signal } = {}) =>
+        new Promise((_, reject) => {
+          signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+          });
+        }),
+    );
+  }
+
+  function selectFile(container, file) {
+    fireEvent.change(container.querySelector('input[type="file"]'), {
+      target: { files: [file] },
+    });
+  }
+
+  const oneParcel = JSON.stringify({ parcels: [{ weight: 1, value: 10, destinationCountry: 'DE' }] });
+
+  it('selecting a new file mid-poll cancels the old batch flow', async () => {
+    const instances = installFakeReader();
+    const onBatchResult = vi.fn();
+    const onError = vi.fn();
+    const { container } = render(
+      <BatchUpload onBatchResult={onBatchResult} onError={onError} onClear={vi.fn()} />,
+    );
+
+    selectFile(container, new File([oneParcel], 'a.json', { type: 'application/json' }));
+    instances[0].complete(oneParcel);
+    vi.mocked(createBatch).mockResolvedValue({ batchId: 'BATCH-OLD', status: 'QUEUED' });
+    mockSignalAwarePoll();
+    vi.mocked(fetchBatchResults).mockResolvedValue({ results: [], resultCount: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: /Process 1 Parcel/ }));
+    await waitFor(() => expect(createBatch).toHaveBeenCalledTimes(1));
+
+    // New file supersedes the running poll: old flow aborts silently.
+    selectFile(container, new File([oneParcel], 'b.json', { type: 'application/json' }));
+    instances[1].complete(oneParcel);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /Process 1 Parcel/ })).toBeTruthy());
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(onBatchResult).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('Cancel aborts processing without error and keeps parcels for retry', async () => {
+    const instances = installFakeReader();
+    const onBatchResult = vi.fn();
+    const onError = vi.fn();
+    const { container } = render(
+      <BatchUpload onBatchResult={onBatchResult} onError={onError} onClear={vi.fn()} />,
+    );
+
+    selectFile(container, new File([oneParcel], 'a.json', { type: 'application/json' }));
+    instances[0].complete(oneParcel);
+    vi.mocked(createBatch).mockResolvedValue({ batchId: 'BATCH-1', status: 'QUEUED' });
+    mockSignalAwarePoll();
+    vi.mocked(fetchBatchResults).mockResolvedValue({ results: [], resultCount: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: /Process 1 Parcel/ }));
+    await waitFor(() => expect(createBatch).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(onBatchResult).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    // Parcels intact: the operator can retry immediately.
+    const retry = await screen.findByRole('button', { name: /Process 1 Parcel/ });
+    expect(retry.disabled).toBe(false);
   });
 });

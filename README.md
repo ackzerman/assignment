@@ -9,7 +9,7 @@ A public parcel routing system that processes parcels and routes them to the app
 - **Backend:** Node.js + Express (JavaScript)
 - **Queue + temporary state:** BullMQ + Redis (`ioredis`)
 - **Frontend:** React + Vite (JavaScript)
-- **Testing:** Jest (backend, 28 suites / 364 tests, Redis state via `ioredis-mock`) + Vitest (frontend, 9 files / 50 tests, jsdom)
+- **Testing:** Jest (backend, 28 suites / 380 tests, Redis state via `ioredis-mock`) + Vitest (frontend, 9 files / 66 tests, jsdom)
 
 ## Project Structure
 
@@ -53,7 +53,7 @@ assignment/
 cd backend
 npm install
 npm run dev        # Start development server (port 3001)
-npm test           # Run 364 automated backend tests (28 suites)
+npm test           # Run 380 automated backend tests (28 suites)
 ```
 
 ### Frontend
@@ -62,7 +62,7 @@ npm test           # Run 364 automated backend tests (28 suites)
 cd frontend
 npm install
 npm run dev        # Start development server (port 5173)
-npm test           # Run 50 frontend unit tests (vitest: pagination, API client, components)
+npm test           # Run 66 frontend unit tests (vitest: pagination, API client, components)
 ```
 
 ## API Contracts
@@ -70,11 +70,15 @@ npm test           # Run 50 frontend unit tests (vitest: pagination, API client,
 | Method | Endpoint | Meaning |
 |---|---|---|
 | `POST` | `/api/parcels` | Single parcel, sync, `200` + `{ parcelId, department, approvals, matchedRules, reasons }` |
+| `POST` | `/api/parcels/validate` | Validate only (no routing), `200` + `{ parcel }` or `400` field errors |
+| `GET` | `/api/parcels/countries` | Full ISO 3166-1 alpha-2 country list for the UI dropdown |
 | `POST` | `/api/batches` | Create batch, async, `202` + `{ batchId, status: QUEUED }` (full-UUID `BATCH-<uuid>`) |
 | `GET` | `/api/batches/:batchId` | Poll progress `{ status, total, processed, successful, failed, progress }` (404 when unknown/expired) |
 | `GET` | `/api/batches/:batchId/results` | Temporary results, paginated (`?limit&offset`, strictly validated, limit capped server-side, malformed values → `400`) |
-| `GET` | `/health/live` | Liveness: is the process alive? |
-| `GET` | `/health/ready` | Readiness: Redis + queue reachable? |
+| `GET` | `/health/live` | Liveness: is the process alive? (excluded from metrics/logs) |
+| `GET` | `/health/ready` | Readiness: Redis + queue reachable? (excluded from metrics/logs) |
+| `GET` | `/api/health` | Legacy liveness alias, `200` + `{ status: ok }` |
+| `GET` | `/api/health/detailed` | Anomaly status + current metrics snapshot |
 | `GET` | `/api/metrics` | Counters: HTTP, routing, jobs, queue depth, job-execution vs terminal-batch latencies |
 
 Legacy alias kept: `POST /api/parcels/route` (single). There is exactly one batch implementation (`POST /api/batches` → BullMQ → worker). Requests over the 10 MB JSON body limit get `413` (never `500`).

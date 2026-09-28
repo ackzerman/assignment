@@ -236,6 +236,9 @@ router.post('/', async (req, res, next) => {
       },
     });
   } catch (error) {
+    // Backpressure 429 carries an explicit Retry-After (fixed 30s probe
+    // interval: queue depth changes in seconds, unlike the 10–15 min rate
+    // windows — a window-derived value here would needlessly stall retries).
     if (error.statusCode === 429) res.setHeader('Retry-After', '30');
     next(error);
   }
@@ -271,10 +274,9 @@ function readIdempotencyKey(req) {
  *   throws 409, retry later.
  * - Complete record, same body → returns the original batch ({ replay: true }).
  * - Complete record, different body → throws 409 conflict.
- * - Complete record but batch state gone → deletes the orphaned mapping and
- *   retries the claim loop (bounded) so the retry proceeds as new work.
- *   (Deletion here only ever removes complete-but-orphaned mappings; the
- *   subsequent claim re-arbitrates, so concurrent cleaners stay safe.)
+ * - Complete record but batch state gone → deletes the orphaned mapping
+ *   (ownership-checked: only if it still names that batchId) and retries
+ *   the claim loop (bounded) so the retry proceeds as new work.
  */
 async function resolveIdempotentSubmission(key, parcels, requestId) {
   const bodyHash = store.hashParcelPayload(parcels);
@@ -319,8 +321,10 @@ async function resolveIdempotentSubmission(key, parcels, requestId) {
       };
     }
 
-    // Mapping survived its batch (TTL skew): drop it and start over.
-    await store.deleteIdempotencyKey(key);
+    // Mapping survived its batch (TTL skew): drop it only if it still
+    // names this batch (a concurrent claimant's replacement is untouched),
+    // then start over via the bounded claim loop.
+    await store.deleteOrphanedIdempotencyRecord(key, record.batchId);
   }
 
   throw new AppError(

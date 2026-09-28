@@ -21,7 +21,7 @@
  * Both expire: jobs are retained briefly, batch keys carry a TTL.
  */
 
-const { Queue, Worker, QueueEvents } = require('bullmq');
+const { Queue } = require('bullmq');
 const { logger } = require('../observability/logger');
 const { positiveIntOrDefault } = require('../config');
 
@@ -34,7 +34,8 @@ function getRedisConnection() {
   }
   const connection = {
     host: process.env.REDIS_HOST || '127.0.0.1',
-    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    // Validated: a malformed REDIS_PORT must fall back to 6379, never NaN.
+    port: positiveIntOrDefault(process.env.REDIS_PORT, 6379),
     maxRetriesPerRequest: null, // Required by BullMQ
   };
   if (process.env.REDIS_PASSWORD) {
@@ -43,7 +44,12 @@ function getRedisConnection() {
   return connection;
 }
 
-const DEFAULT_REDIS_CONFIG = getRedisConnection();
+// Read fresh on every call: startEmbeddedRedisIfEnabled() rewrites
+// REDIS_HOST/PORT at startup, and module-load snapshots would keep pointing
+// at the pre-embedded (wrong) port. Never cache this in a module constant.
+function getDefaultRedisConfig() {
+  return getRedisConnection();
+}
 
 const QUEUE_NAME = 'batch-processing';
 
@@ -75,7 +81,7 @@ let queueEvents = null;
 function initQueue(redisConfig) {
   if (queue) return queue;
 
-  const connection = redisConfig || DEFAULT_REDIS_CONFIG;
+  const connection = redisConfig || getDefaultRedisConfig();
 
   queue = new Queue(QUEUE_NAME, {
     connection,
@@ -208,7 +214,8 @@ module.exports = {
   QUEUE_NAME,
   JOB_RETRY_CONFIG,
   getMaxQueueDepth,
-  DEFAULT_REDIS_CONFIG,
+  getRedisConnection,
+  getDefaultRedisConfig,
   initQueue,
   addBatchJob,
   getBatchJob,

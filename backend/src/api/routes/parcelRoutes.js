@@ -56,6 +56,9 @@ function handleSingleParcel(req, res, next) {
     recordRouting(result.department, result.approvals);
     recordProcessingTime(Date.now() - start);
 
+    // Fallback ID for parcels without one. Single-parcel scope has no index
+    // context, so it uses `P-<8hex>`; batch scope uses index-based `P{N}`
+    // (see generateBatchParcelId). Both satisfy the shared contract.
     const parcelId = hasParcelId(input.parcelId) ? input.parcelId : `P-${randomUUID().split('-')[0]}`;
 
     logger.info('Parcel routed', {

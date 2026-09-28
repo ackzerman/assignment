@@ -1,19 +1,22 @@
 /**
- * Startup orphan recovery.
+ * Startup + periodic orphan recovery.
  *
  * Failure model: batch creation is (1) create Redis state, then (2) enqueue
  * the BullMQ job. If the process crashes between those two steps, the batch
  * stays QUEUED forever with no job to process it (it would only disappear
- * silently at TTL expiry).
+ * silently at TTL expiry). A second window exists for PROCESSING batches
+ * whose BullMQ job was lost (Redis flush, completed-job eviction): no worker
+ * will ever pick them up again.
  *
- * Recovery: at startup, find QUEUED batches with no corresponding queue job
- * and re-enqueue them. This is safe because:
+ * Recovery: find old QUEUED *or PROCESSING* batches with no corresponding
+ * queue job and re-enqueue them. This is safe because:
  * - Job IDs are deterministic (`batch-{batchId}`), so "no job" is checkable.
- * - Only QUEUED batches qualify — a batch already PROCESSING/COMPLETED/
- *   FAILED is owned by (or finished in) another execution and is untouched.
+ * - Only QUEUED/PROCESSING batches qualify — a COMPLETED/
+ *   COMPLETED_WITH_ERRORS/FAILED batch is finished and is untouched.
  * - A grace period skips freshly-created batches whose enqueue may still be
  *   in flight (single-instance deployments aside, never touch new work).
- * - Reprocessing is idempotent anyway (chunk checkpoints + HSETNX results).
+ * - Reprocessing is idempotent anyway (chunk checkpoints + HSETNX results):
+ *   a PROCESSING re-enqueue at worst recomputes its unfinished chunk.
  *
  * At-least-once reminder: recovery may re-enqueue work that eventually
  * executes twice (e.g. crash after enqueue but before the job runs is NOT
@@ -64,7 +67,11 @@ async function recoverOrphanedBatches(options = {}) {
     summary.checked++;
     try {
       const state = await batchStore.getBatchState(batchId);
-      if (!state || state.status !== 'QUEUED') {
+      // Only non-terminal batches with no live job qualify. PROCESSING is
+      // included: a PROCESSING batch whose BullMQ job was lost (Redis flush,
+      // completed-job eviction) would otherwise linger until TTL expiry —
+      // chunk checkpoints + HSETNX results absorb the re-enqueue safely.
+      if (!state || (state.status !== 'QUEUED' && state.status !== 'PROCESSING')) {
         summary.skipped++;
         continue;
       }
@@ -114,9 +121,10 @@ module.exports = {
  * (e.g. crash 20s before restart with a 60s grace) are eventually recovered
  * once they age out — instead of lingering QUEUED until TTL expiry.
  *
- * Safety is identical to the startup pass: only old QUEUED batches with no
- * queue job are re-enqueued; terminal batches are never touched; duplicate
- * execution is absorbed by idempotent checkpoints/HSETNX results.
+ * Safety is identical to the startup pass: only old QUEUED/PROCESSING
+ * batches with no queue job are re-enqueued; terminal batches are never
+ * touched; duplicate execution is absorbed by idempotent checkpoints/HSETNX
+ * results.
  *
  * @param {object} [options]
  * @param {number} [options.intervalMs] - Reconciliation period

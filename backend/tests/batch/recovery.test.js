@@ -71,10 +71,10 @@ describe('Orphan batch recovery', () => {
     expect(added).toHaveLength(0);
   });
 
-  it('skips non-QUEUED batches (PROCESSING/COMPLETED/FAILED untouched)', async () => {
+  it('leaves terminal batches untouched (COMPLETED/COMPLETED_WITH_ERRORS/FAILED)', async () => {
     const states = {
-      'BATCH-proc': { status: 'PROCESSING', createdAt: OLD },
       'BATCH-done': { status: 'COMPLETED', createdAt: OLD },
+      'BATCH-cwe': { status: 'COMPLETED_WITH_ERRORS', createdAt: OLD },
       'BATCH-fail': { status: 'FAILED', createdAt: OLD },
     };
     const added = [];
@@ -88,6 +88,44 @@ describe('Orphan batch recovery', () => {
       log: silentLog,
     });
     expect(summary).toEqual({ checked: 3, recovered: 0, skipped: 3 });
+    expect(added).toHaveLength(0);
+  });
+
+  it('recovers an old PROCESSING batch whose queue job was lost', async () => {
+    // Lost-job window: Redis flush or completed-job eviction orphaned a
+    // PROCESSING batch. Re-enqueue is safe (checkpoints + HSETNX absorb it).
+    const states = {
+      'BATCH-proc-orphan': { status: 'PROCESSING', createdAt: OLD },
+    };
+    const added = [];
+    const queue = fakeQueue();
+    const origAdd = queue.addBatchJob;
+    queue.addBatchJob = async (id) => { added.push(id); return origAdd(id); };
+    const summary = await recoverOrphanedBatches({
+      now: NOW,
+      batchStore: fakeStore(states),
+      queueModule: queue,
+      log: silentLog,
+    });
+    expect(summary).toEqual({ checked: 1, recovered: 1, skipped: 0 });
+    expect(added).toEqual(['BATCH-proc-orphan']);
+  });
+
+  it('skips a PROCESSING batch that still has a live queue job', async () => {
+    const states = {
+      'BATCH-proc-live': { status: 'PROCESSING', createdAt: OLD },
+    };
+    const queue = fakeQueue({ jobs: { 'BATCH-proc-live': { id: 'batch-BATCH-proc-live' } } });
+    const added = [];
+    const origAdd = queue.addBatchJob;
+    queue.addBatchJob = async (id) => { added.push(id); return origAdd(id); };
+    const summary = await recoverOrphanedBatches({
+      now: NOW,
+      batchStore: fakeStore(states),
+      queueModule: queue,
+      log: silentLog,
+    });
+    expect(summary).toEqual({ checked: 1, recovered: 0, skipped: 1 });
     expect(added).toHaveLength(0);
   });
 

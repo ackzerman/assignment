@@ -75,4 +75,31 @@ describe('api client', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(fetch.mock.calls.length).toBe(callsAfterAbort);
   });
+
+  it.each([['COMPLETED_WITH_ERRORS'], ['FAILED']])(
+    'pollBatchStatus resolves on terminal status %s',
+    async (status) => {
+      fetch
+        .mockResolvedValueOnce(jsonResponse({ data: { status: 'PROCESSING', progress: 10 } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { status, progress: 100 } }));
+      const final = await pollBatchStatus('B1', { intervalMs: 1 });
+      expect(final.status).toBe(status);
+    },
+  );
+
+  it('surfaces a tailored message for 413 without a backend body', async () => {
+    fetch.mockResolvedValue(jsonResponse({}, { ok: false, status: 413 }));
+    await expect(fetchBatchResults('B1', { limit: 200 })).rejects.toMatchObject({
+      status: 413,
+      message: expect.stringMatching(/too large/i),
+    });
+  });
+
+  it('fetchBatchResults passes the abort signal through to fetch', async () => {
+    fetch.mockResolvedValue(jsonResponse({ data: { results: [], resultCount: 0 } }));
+    const controller = new AbortController();
+    await fetchBatchResults('B1', { limit: 200, signal: controller.signal });
+    const [, options] = fetch.mock.calls[0];
+    expect(options.signal).toBe(controller.signal);
+  });
 });

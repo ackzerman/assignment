@@ -227,11 +227,13 @@ function getMetrics() {
 
   return {
     ...metrics,
+    // Defensive copy: callers must not mutate the live rolling-window array.
+    errorTimestamps: [...metrics.errorTimestamps],
     routedTotal,
     distribution,
     uptime: getUptime(),
     avgProcessingTimeMs: total > 0
-      ? (metrics.totalProcessingTimeMs / total).toFixed(2)
+      ? Number((metrics.totalProcessingTimeMs / total).toFixed(2))
       : 0,
     avgHttpLatencyMs: metrics.httpLatencyCount > 0
       ? Number((metrics.httpLatencyMsTotal / metrics.httpLatencyCount).toFixed(2))

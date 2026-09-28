@@ -16,6 +16,24 @@ const { randomUUID } = require('crypto');
 const { logger } = require('../../observability/logger');
 const { recordHttpRequest } = require('../../observability/metrics');
 
+/**
+ * Paths excluded from HTTP metrics + access logging. Health probes and the
+ * metrics/anomaly endpoints themselves must not feed the counters they are
+ * read from: every scrape would otherwise inflate httpRequests (and the
+ * error rate on a 503 readiness response), creating a self-observation loop.
+ */
+const OBSERVABILITY_PATHS = new Set([
+  '/health/live',
+  '/health/ready',
+  '/api/health',
+  '/api/metrics',
+  '/api/health/detailed',
+]);
+
+function isObservabilityPath(req) {
+  return OBSERVABILITY_PATHS.has(req.path);
+}
+
 // Request IDs are echoed into response headers and structured logs, so an
 // attacker-controlled value must be constrained: cap length and charset,
 // otherwise an arbitrary huge or dangerous value propagates everywhere.
@@ -64,15 +82,16 @@ function requestLogger(req, res, next) {
   res.on('finish', () => {
     const duration = Date.now() - start;
 
+    // Skip observability endpoints entirely (see OBSERVABILITY_PATHS):
+    // probes and scrapes must neither inflate counters nor spam logs.
+    if (isObservabilityPath(req)) return;
+
     // Master observability: every request counted (count, errors, latency).
     try {
       recordHttpRequest(res.statusCode, duration);
     } catch {
       // Metrics must never break request handling.
     }
-
-    // Skip health check logging (too noisy)
-    if (req.path === '/api/health') return;
 
     const logData = {
       requestId: req.id,
@@ -91,4 +110,4 @@ function requestLogger(req, res, next) {
   next();
 }
 
-module.exports = { requestId, requestLogger, isValidRequestId, MAX_REQUEST_ID_LENGTH };
+module.exports = { requestId, requestLogger, isValidRequestId, isObservabilityPath, MAX_REQUEST_ID_LENGTH };

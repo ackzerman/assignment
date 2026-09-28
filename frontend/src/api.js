@@ -20,10 +20,26 @@ async function parseJsonSafe(response) {
 }
 
 function toApiError(data, response) {
-  const error = new Error(data.message || 'Request failed');
+  const error = new Error(data.message || defaultMessageFor(response.status));
   error.status = response.status;
   error.validationErrors = data.errors || null;
   return error;
+}
+
+/**
+ * Fallback message when the backend sent no JSON message (e.g. a proxy or
+ * body-parser rejection without a body). 413 gets tailored copy so an
+ * oversize upload that slipped past the 9 MB client check still reads
+ * clearly instead of "Request failed".
+ */
+function defaultMessageFor(status) {
+  if (status === 413) {
+    return 'Request body too large. Maximum size is 10 MB — try a smaller batch file.';
+  }
+  if (status === 429) {
+    return 'Too many requests. Please wait and try again.';
+  }
+  return 'Request failed';
 }
 
 function throwIfAborted(signal) {
@@ -133,7 +149,7 @@ export async function createBatch(parcels, { signal, idempotencyKey } = {}) {
  * @returns {Promise<object>} - Final batch status payload
  */
 export async function pollBatchStatus(batchId, options = {}) {
-  const intervalMs = options.onProgress ? options.intervalMs || 1000 : options.intervalMs || 1000;
+  const intervalMs = options.intervalMs || 1000;
   const timeoutMs = options.timeoutMs || 120000;
   const onProgress = options.onProgress || null;
   const signal = options.signal || null;

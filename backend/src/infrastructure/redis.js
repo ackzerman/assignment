@@ -18,6 +18,7 @@
  */
 
 const { logger } = require('../observability/logger');
+const { positiveIntOrDefault } = require('../config');
 
 let RedisImpl = null;
 let client = null;
@@ -46,7 +47,8 @@ function buildOptions() {
   }
   const options = {
     host: process.env.REDIS_HOST || '127.0.0.1',
-    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    // Validated: a malformed REDIS_PORT must fall back to 6379, never NaN.
+    port: positiveIntOrDefault(process.env.REDIS_PORT, 6379),
     lazyConnect: true,
     // Fail fast on state operations instead of buffering forever when down.
     maxRetriesPerRequest: 3,
@@ -136,7 +138,9 @@ let embeddedServer = null;
  */
 async function startEmbeddedRedisIfEnabled() {
   if (process.env.EMBEDDED_REDIS !== '1' || embeddedServer) {
-    return embeddedServer ? { host: process.env.REDIS_HOST, port: parseInt(process.env.REDIS_PORT, 10) } : null;
+    return embeddedServer
+      ? { host: process.env.REDIS_HOST, port: positiveIntOrDefault(process.env.REDIS_PORT, 6379) }
+      : null;
   }
   let RedisMemoryServer;
   try {

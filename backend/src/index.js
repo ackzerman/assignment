@@ -73,11 +73,14 @@ async function start() {
       logger.info('Server started', { port: PORT });
       console.log(`[Server] Parcel Routing System running on port ${PORT}`);
       console.log(`[Server] Health check: http://localhost:${PORT}/health/live`);
-      console.log(`[Server] API docs: POST /api/parcels/route, POST /api/batches`);
+      console.log(`[Server] API docs: POST /api/parcels, POST /api/parcels/validate, POST /api/batches`);
     });
 
-    // Set server timeout to prevent hanging requests
-    server.timeout = 30000; // 30 seconds
+    // Socket timeout for HTTP connections. 120s (not 30s): batch status/
+    // results handlers are quick polls, but a stalled Redis round-trip
+    // during legitimate multi-minute batch work must not kill the socket
+    // mid-response. The 5-minute chunk lease remains the worker-side bound.
+    server.timeout = 120000; // 120 seconds
 
   } catch (err) {
     logger.error('Failed to start server', { error: err.message, stack: err.stack });

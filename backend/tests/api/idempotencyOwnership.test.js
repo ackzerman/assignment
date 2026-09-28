@@ -138,4 +138,45 @@ describe('Idempotency ownership', () => {
   it('owner cleanup of a missing key succeeds (nothing to clean)', async () => {
     expect(await store.deleteIdempotencyKeyIfOwner(`nope-${Date.now()}`, 'any-token')).toBe(true);
   });
+
+  it('orphan-mapping delete removes only the expected batch mapping', async () => {
+    const key = `owner-e-${Date.now()}`;
+    const token = await store.claimIdempotencyKey(key, TTL);
+    expect(
+      await store.completeIdempotencyRecord(
+        key,
+        token,
+        { batchId: 'BATCH-ORPHAN-1', bodyHash: 'h' },
+        TTL,
+      ),
+    ).toBe(true);
+
+    // Matching batchId: deleted.
+    expect(await store.deleteOrphanedIdempotencyRecord(key, 'BATCH-ORPHAN-1')).toBe(true);
+    expect(await store.getIdempotencyRecord(key)).toBeNull();
+  });
+
+  it('orphan-mapping delete never disturbs a concurrent replacement', async () => {
+    const key = `owner-f-${Date.now()}`;
+    const token = await store.claimIdempotencyKey(key, TTL);
+    await store.completeIdempotencyRecord(
+      key,
+      token,
+      { batchId: 'BATCH-OLD', bodyHash: 'h' },
+      TTL,
+    );
+
+    // Concurrent claimant replaced the mapping with a new pending claim.
+    const client = await redis.getRedisClient();
+    await client.del(`idempotency:${key}`);
+    const tokenB = await store.claimIdempotencyKey(key, TTL);
+    expect(tokenB).toBeTruthy();
+
+    // Stale cleaner naming the old batch: mapping untouched.
+    expect(await store.deleteOrphanedIdempotencyRecord(key, 'BATCH-OLD')).toBe(false);
+    expect(await store.getIdempotencyRecord(key)).toMatchObject({
+      status: 'pending',
+      token: tokenB,
+    });
+  });
 });

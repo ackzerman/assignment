@@ -19,7 +19,7 @@ export default function ApprovalItem({ approval }) {
   return (
     <>
       <span
-        className="dept-badge-sm"
+        className="approval-type-badge dept-badge-sm"
         style={{ backgroundColor: style.background, color: style.color }}
       >
         {approval.type}

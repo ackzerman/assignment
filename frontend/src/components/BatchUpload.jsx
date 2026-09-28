@@ -58,7 +58,7 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
 
   // Abort any in-flight batch flow AND file read when this component unmounts
   // (tab switch / navigation). Prevents leaked polling, leaked reads, and
-  // stale UI updates.
+  // stale UI updates. No setState here — the component is gone.
   useEffect(() => () => {
     fileGenRef.current++;
     readerRef.current?.abort();
@@ -68,25 +68,49 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
   }, []);
 
   /**
+   * Cancels the in-flight batch submission/poll without touching file state.
+   * Used when a newer file supersedes the run or the operator resets: the
+   * late poll callbacks abort silently (never overwrite the new UI), and the
+   * submit guard is released so the new file can be processed.
+   */
+  function abortBatchFlow() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    submittingRef.current = false;
+    setProcessing(false);
+    setProgress(null);
+  }
+
+  function resetFileInput() {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  }
+
+  /**
    * Reads and parses a JSON file.
    * Validates structure before sending to the backend.
    */
   function handleFile(selectedFile) {
-    // A newer file supersedes any in-flight read: abort it and invalidate
-    // its callbacks before touching state.
+    // A newer file supersedes everything in flight: abort the pending read
+    // (invalidating its callbacks) AND any running batch poll, so stale work
+    // can never overwrite the UI for this file.
     fileGenRef.current++;
     readerRef.current?.abort();
     readerRef.current = null;
+    abortBatchFlow();
 
-    // Reset state
+    // Reset file state (but NOT the parent result: picking a file — even an
+    // invalid one — must not wipe a previously good result; onClear runs
+    // only once the new file parses successfully).
     setParseError(null);
     setParcels(null);
-    onClear();
+    setFile(null);
 
-    // Validate file type
-    if (!selectedFile.name.endsWith('.json')) {
+    // Validate file type (case-insensitive: some systems save FILE.JSON)
+    if (!selectedFile.name.toLowerCase().endsWith('.json')) {
       setParseError('Please upload a JSON file (.json).');
-      setFile(null);
+      resetFileInput();
       return;
     }
 
@@ -96,11 +120,9 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
       setParseError(
         `File is too large (${(selectedFile.size / 1024 / 1024).toFixed(1)} MB). Maximum size is ${MAX_FILE_SIZE_MB} MB (below the server's 10 MB request limit, leaving room for the upload envelope).`
       );
-      setFile(null);
+      resetFileInput();
       return;
     }
-
-    setFile(selectedFile);
 
     // Read and parse the file. The generation captured here lets stale
     // readers (aborted or superseded) no-op instead of mutating state.
@@ -111,6 +133,13 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
     reader.onload = (e) => {
       if (fileGenRef.current !== generation) return; // Stale: superseded/unmounted.
       readerRef.current = null;
+      // The file is only adopted once it parses: showing the green
+      // has-file state for a malformed file would contradict the error.
+      const fail = (message) => {
+        setFile(null);
+        resetFileInput();
+        setParseError(message);
+      };
       try {
         const data = JSON.parse(e.target.result);
 
@@ -121,7 +150,7 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
         } else if (data && Array.isArray(data.parcels)) {
           parcelArray = data.parcels;
         } else {
-          setParseError(
+          fail(
             'Invalid file format. Expected a JSON array of parcels, or an object with a "parcels" array. ' +
             'Example: [{ "weight": 2, "value": 100, "destinationCountry": "DE" }]'
           );
@@ -129,13 +158,15 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
         }
 
         if (parcelArray.length === 0) {
-          setParseError('File contains no parcels.');
+          fail('File contains no parcels.');
           return;
         }
 
+        setFile(selectedFile);
         setParcels(parcelArray);
+        onClear();
       } catch {
-        setParseError(
+        fail(
           'Failed to parse JSON. Please check the file format. ' +
           'Common issues: trailing commas, single quotes, or missing brackets.'
         );
@@ -233,18 +264,27 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
   }
 
   /**
-   * Resets the upload form.
+   * Cancels the running batch flow (long 10k-parcel batches can take
+   * minutes). File + parsed parcels are kept so the operator can retry
+   * immediately; the late poll aborts silently and never delivers a result.
+   */
+  function handleCancel() {
+    abortBatchFlow();
+  }
+
+  /**
+   * Resets the upload form. Also cancels any pending file read so a late
+   * onload can never repopulate the cleared form.
    */
   function handleReset() {
+    fileGenRef.current++;
+    readerRef.current?.abort();
+    readerRef.current = null;
+    abortBatchFlow();
     setFile(null);
     setParcels(null);
     setParseError(null);
-    submittingRef.current = false;
-    setProcessing(false);
-    setProgress(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
+    resetFileInput();
     onClear();
   }
 
@@ -320,28 +360,21 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
         </div>
       )}
 
-      {/* Async progress (Master Phase 8: poll status, show progress).
-          The raw batch UUID is never the title — it renders only as a
-          secondary reference below the human-readable status. */}
-      {processing && progress && (
-        <div className="batch-progress">
-          <p>
-            <strong>Batch Processing</strong>
-            <br />
-            Status: {progress.status}
-            {typeof progress.processed === 'number' && typeof progress.total === 'number' && (
-              <> · {progress.processed.toLocaleString()} / {progress.total.toLocaleString()} processed</>
-            )}
-            {typeof progress.progress === 'number' && <> · {progress.progress}%</>}
-          </p>
-          {progress.batchId && (
-            <p className="batch-reference">Reference: {progress.batchId}</p>
-          )}
-          {typeof progress.progress === 'number' && (
-            <progress value={progress.progress} max="100" style={{ width: '100%' }} />
-          )}
-        </div>
-      )}
+      {/* Async progress: operator-facing circular indicator only.
+          Polling behavior is unchanged — only the presentation is minimal:
+          ring + percentage. No status text, counts, UUID, or bars. */}
+      {processing && progress && (() => {
+        const pct = typeof progress.progress === 'number'
+          ? Math.min(100, Math.max(0, Math.round(progress.progress)))
+          : 0;
+        return (
+          <div className="batch-progress-ring" role="status" aria-label={`Processing ${pct} percent`}>
+            <div className="batch-progress-circle" style={{ '--p': `${pct}%` }}>
+              <span className="batch-progress-value">{pct}%</span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Actions */}
       <div className="form-actions">
@@ -366,6 +399,15 @@ export default function BatchUpload({ onBatchResult, onError, onClear }) {
         >
           Clear
         </button>
+        {processing && (
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={handleCancel}
+          >
+            Cancel
+          </button>
+        )}
       </div>
     </div>
   );

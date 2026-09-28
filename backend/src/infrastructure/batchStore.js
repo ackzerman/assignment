@@ -524,14 +524,33 @@ async function tryMarkBatchProcessing(batchId) {
 }
 
 /**
+ * The full batch state machine. Every status mutation must go through one
+ * of these edges — anything else is a programming error and throws.
+ *
+ *   QUEUED → PROCESSING → COMPLETED
+ *   QUEUED → PROCESSING → COMPLETED_WITH_ERRORS
+ *   QUEUED / PROCESSING → FAILED
+ *
+ * Terminal states (COMPLETED, COMPLETED_WITH_ERRORS, FAILED) are final.
+ * Note QUEUED → COMPLETED is NOT an edge: completion requires every chunk
+ * DONE (enforced by tryFinalizeBatch's Lua script), so jumping straight
+ * from QUEUED would finalize an unprocessed batch.
+ */
+const ALLOWED_TRANSITIONS = {
+  QUEUED: new Set(['PROCESSING', 'FAILED']),
+  PROCESSING: new Set(['COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED']),
+};
+
+/**
  * Updates batch status fields (QUEUED→PROCESSING→terminal). Terminal states
  * also stamp completedAt. Refreshes the meta TTL.
  *
- * State-machine guard: a terminal batch (COMPLETED, COMPLETED_WITH_ERRORS,
- * FAILED) can never leave its terminal state through this setter. Use the
- * atomic try* transitions (tryMarkBatchProcessing / tryFinalizeBatch /
- * tryMarkBatchFailed) on hot paths; this setter throws on terminal escape
- * so a programming error fails loudly instead of resurrecting finished work.
+ * State-machine guard: any transition outside ALLOWED_TRANSITIONS throws,
+ * and a terminal batch (COMPLETED, COMPLETED_WITH_ERRORS, FAILED) can never
+ * leave its terminal state. Use the atomic try* transitions
+ * (tryMarkBatchProcessing / tryFinalizeBatch / tryMarkBatchFailed) on hot
+ * paths; this setter throws on illegal moves so a programming error fails
+ * loudly instead of corrupting or resurrecting finished work.
  */
 async function setBatchStatus(batchId, status, extra = {}) {
   const redis = await getRedisClient();
@@ -542,6 +561,9 @@ async function setBatchStatus(batchId, status, extra = {}) {
     current !== status
   ) {
     throw new Error(`Illegal batch transition: ${current} → ${status} (terminal states are final)`);
+  }
+  if (current && current !== status && !(ALLOWED_TRANSITIONS[current] && ALLOWED_TRANSITIONS[current].has(status))) {
+    throw new Error(`Illegal batch transition: ${current} → ${status} (not a valid state-machine edge)`);
   }
   const fields = { status };
   if (extra.startedAt) fields.startedAt = extra.startedAt;
@@ -695,17 +717,48 @@ function badPaginationParam(name) {
 }
 
 /**
+ * Normalizes a result window from either raw query strings or already-parsed
+ * numbers (route layer parses first; direct callers may pass strings).
+ * Both shapes enforce identical strict semantics — no lenient path exists.
+ */
+function normalizeResultWindow(options = {}) {
+  const maxLimit = getResultsMaxLimit();
+  let limit = maxLimit;
+  if (options.limit !== undefined) {
+    limit = typeof options.limit === 'string'
+      ? parseStrictPositiveInt(options.limit, 'limit')
+      : strictResultNumber(options.limit, 'limit', 1);
+  }
+  limit = Math.min(limit, maxLimit);
+
+  let offset = 0;
+  if (options.offset !== undefined) {
+    offset = typeof options.offset === 'string'
+      ? parseStrictNonNegativeInt(options.offset, 'offset')
+      : strictResultNumber(options.offset, 'offset', 0);
+  }
+  return { limit, offset };
+}
+
+function strictResultNumber(value, name, min) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
+    throw badPaginationParam(name);
+  }
+  return value;
+}
+
+/**
  * Reads stored results ordered by parcel index, paginated.
  * Limit is capped so one request cannot dump an unbounded result set.
+ *
+ * Single validation path: raw query strings go through the same strict
+ * parsers as parsePaginationQuery (malformed → 400-style error, never
+ * silently reinterpreted); already-parsed numbers must be integers in
+ * range. There is no lenient parseInt fallback anywhere on this path.
  */
 async function getBatchResults(batchId, options = {}) {
   const redis = await getRedisClient();
-  const maxLimit = getResultsMaxLimit();
-  let limit = options.limit !== undefined ? parseInt(options.limit, 10) : maxLimit;
-  if (!Number.isFinite(limit) || limit <= 0) limit = maxLimit;
-  limit = Math.min(limit, maxLimit);
-  let offset = options.offset !== undefined ? parseInt(options.offset, 10) : 0;
-  if (!Number.isFinite(offset) || offset < 0) offset = 0;
+  const { limit, offset } = normalizeResultWindow(options);
 
   const all = await redis.hgetall(keys(batchId).results);
   const rows = Object.entries(all)
@@ -795,6 +848,21 @@ const IDEM_DELETE_IF_OWNER_SCRIPT = [
   'return 1',
 ].join('\n');
 
+// Deletes a complete-but-orphaned mapping ONLY if it still names the
+// expected batchId. A concurrent claimant that already replaced the mapping
+// (new pending claim or a different batch) is never disturbed: the plain
+// substring match fails and nothing is deleted. Batch IDs are
+// `BATCH-<uuid>` (no quotes/backslashes), so plain-find concatenation is safe.
+const IDEM_DELETE_ORPHAN_SCRIPT = [
+  "local raw = redis.call('get', KEYS[1])",
+  'if not raw then return 1 end',
+  "if string.find(raw, '\"batchId\":\"' .. ARGV[1] .. '\"', 1, true) then",
+  "  redis.call('del', KEYS[1])",
+  '  return 1',
+  'end',
+  'return 0',
+].join('\n');
+
 function idempotencyRedisKey(key) {
   return `idempotency:${key}`;
 }
@@ -867,25 +935,22 @@ async function completeIdempotencyRecord(key, token, { batchId, bodyHash }, ttlS
 }
 
 /**
- * Stores the completed idempotency mapping (overwrites our own claim).
+ * Deletes a complete-but-orphaned idempotency mapping (its batch state is
+ * gone via TTL skew), but ONLY if the mapping still names the expected
+ * batchId. Concurrent claimants that replaced the mapping are never
+ * disturbed — use this instead of an unconditional delete.
  *
- * @deprecated Use completeIdempotencyRecord (ownership-checked) instead.
- * Kept for backward compatibility with existing callers/tests.
+ * @returns {boolean} true if no foreign mapping was disturbed
  */
-async function setIdempotencyRecord(key, record, ttlSec) {
+async function deleteOrphanedIdempotencyRecord(key, batchId) {
   const redis = await getRedisClient();
-  await redis.set(idempotencyRedisKey(key), JSON.stringify(record), 'EX', ttlSec);
-}
-
-/**
- * Deletes an idempotency record (cleanup after failures).
- *
- * @deprecated Use deleteIdempotencyKeyIfOwner instead: unconditional
- * deletion can remove a newer owner's claim.
- */
-async function deleteIdempotencyKey(key) {
-  const redis = await getRedisClient();
-  await redis.del(idempotencyRedisKey(key));
+  const ok = await redis.eval(
+    IDEM_DELETE_ORPHAN_SCRIPT,
+    1,
+    idempotencyRedisKey(key),
+    batchId,
+  );
+  return ok === 1;
 }
 
 /**
@@ -935,7 +1000,6 @@ module.exports = {
   claimIdempotencyKey,
   getIdempotencyRecord,
   completeIdempotencyRecord,
-  setIdempotencyRecord,
-  deleteIdempotencyKey,
+  deleteOrphanedIdempotencyRecord,
   deleteIdempotencyKeyIfOwner,
 };

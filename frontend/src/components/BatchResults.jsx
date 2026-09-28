@@ -18,9 +18,9 @@
  */
 
 import { useState, useEffect } from 'react';
-import { fetchBatchResults } from '../api';
+import { fetchBatchResults, isAbortError } from '../api';
 import { PAGE_SIZE, pageCountFor, clampPage } from '../pagination';
-import { normalizeApprovals } from '../approvals';
+import { normalizeApprovals, approvalBadgeStyle } from '../approvals';
 import ApprovalItem from './ApprovalItem';
 
 // Department display colors (same as RoutingResult)
@@ -29,6 +29,11 @@ const DEPT_COLORS = {
   Regular: '#10b981',
   Heavy: '#f59e0b',
 };
+
+/** Safe finite count for summary cards: missing/NaN API fields render 0, never crash. */
+function safeCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
 
 export default function BatchResults({ data }) {
   const [filter, setFilter] = useState('all'); // 'all' | 'routed' | 'invalid'
@@ -51,19 +56,24 @@ export default function BatchResults({ data }) {
 
   useEffect(() => {
     if (!batchId || legacyRows) return;
-    let cancelled = false;
-    fetchBatchResults(batchId, { limit: PAGE_SIZE, offset: pageState.page * PAGE_SIZE }).then(
+    const controller = new AbortController();
+    fetchBatchResults(batchId, {
+      limit: PAGE_SIZE,
+      offset: pageState.page * PAGE_SIZE,
+      signal: controller.signal,
+    }).then(
       (payload) => {
-        if (cancelled) return;
         setPageState((s) => ({ ...s, rows: payload.results || [], loading: false, error: null }));
         setExpandedRows(new Set());
       },
       (err) => {
-        if (cancelled) return;
+        // Aborted (rapid Prev/Next or unmount): silent, a newer fetch owns the UI.
+        if (isAbortError(err)) return;
+        setExpandedRows(new Set());
         setPageState((s) => ({ ...s, rows: [], loading: false, error: err.message || 'Failed to load results page.' }));
       },
     );
-    return () => { cancelled = true; };
+    return () => { controller.abort(); };
   }, [batchId, pageState.page, legacyRows]);
 
   if (!data) return null;
@@ -76,6 +86,13 @@ export default function BatchResults({ data }) {
         processedAt: batch.completedAt || batch.createdAt,
       }
     : { total: 0, successful: 0, failed: 0 });
+  // Partial/malformed payloads (e.g. FAILED without counts) must render
+  // zeros, never throw on toLocaleString of undefined.
+  const summaryTotal = safeCount(summary.total);
+  const summarySuccessful = safeCount(summary.successful);
+  const summaryFailed = safeCount(summary.failed);
+  const processedAt = summary.processedAt ? new Date(summary.processedAt) : null;
+  const processedAtValid = processedAt instanceof Date && !Number.isNaN(processedAt.getTime());
   const results = legacyRows || pageState.rows;
   const { page, loading } = pageState;
   const loadError = pageState.error;
@@ -110,6 +127,10 @@ export default function BatchResults({ data }) {
     const clamped = clampPage(next, pageCount);
     if (clamped === pageState.page) return;
     // Event handler (not an effect): safe to flag loading synchronously.
+    // Expanded rows belong to the old page — clear them so a same-index row
+    // on the new page never opens pre-expanded. The filter persists across
+    // pages (labels make the per-page scope explicit).
+    setExpandedRows(new Set());
     setPageState((s) => ({ ...s, page: clamped, loading: true, error: null }));
   }
 
@@ -117,13 +138,12 @@ export default function BatchResults({ data }) {
     <div className="batch-results">
       <h2>Batch Results</h2>
 
-      {batch && (
+      {/* Operator-facing completion line. Both terminal success states
+          read identically — the internal "COMPLETED_WITH_ERRORS" string is
+          never shown; the Failed summary card communicates the errors. */}
+      {batch && (batch.status === 'COMPLETED' || batch.status === 'COMPLETED_WITH_ERRORS') && (
         <div className="batch-meta">
-          <p>
-            Batch {batch.status}
-            {typeof batch.progress === 'number' && <> · {batch.progress}%</>}
-          </p>
-          <p className="na-text batch-reference">Batch reference: {batch.batchId}</p>
+          <p>Batch completed · 100%</p>
         </div>
       )}
 
@@ -142,15 +162,15 @@ export default function BatchResults({ data }) {
       {/* Summary Cards */}
       <div className="batch-summary">
         <div className="summary-card summary-total">
-          <div className="summary-card-number">{summary.total.toLocaleString()}</div>
+          <div className="summary-card-number">{summaryTotal.toLocaleString()}</div>
           <div className="summary-card-label">Total</div>
         </div>
         <div className="summary-card summary-success">
-          <div className="summary-card-number">{summary.successful.toLocaleString()}</div>
+          <div className="summary-card-number">{summarySuccessful.toLocaleString()}</div>
           <div className="summary-card-label">Routed</div>
         </div>
         <div className="summary-card summary-failed">
-          <div className="summary-card-number">{summary.failed.toLocaleString()}</div>
+          <div className="summary-card-number">{summaryFailed.toLocaleString()}</div>
           <div className="summary-card-label">Failed</div>
         </div>
       </div>
@@ -171,8 +191,9 @@ export default function BatchResults({ data }) {
         </div>
       )}
 
-      {/* Filter Controls (current page) */}
+      {/* Filter Controls — counts are for the loaded page only (see label) */}
       <div className="batch-filters">
+        <span className="dept-breakdown-label">Filters (current page):</span>
         <button
           className={`filter-btn ${filter === 'all' ? 'active' : ''}`}
           onClick={() => setFilter('all')}
@@ -235,8 +256,19 @@ export default function BatchResults({ data }) {
                 <td>
                   {r.status === 'routed' ? (
                     normalizeApprovals(r.approvals).length > 0 ? (
-                      <span className="approval-badge-sm required">
-                        {normalizeApprovals(r.approvals).map((a) => a.type).join(', ')}
+                      <span className="approval-badges-cell">
+                        {normalizeApprovals(r.approvals).map((a, i) => {
+                          const style = approvalBadgeStyle(a.type);
+                          return (
+                            <span
+                              key={i}
+                              className="approval-badge-sm required"
+                              style={{ backgroundColor: style.background, color: style.color }}
+                            >
+                              {a.type}
+                            </span>
+                          );
+                        })}
                       </span>
                     ) : (
                       <span className="approval-badge-sm not-required">None</span>
@@ -305,12 +337,15 @@ export default function BatchResults({ data }) {
             ) : (
               <div className="detail-panel-body">
                 <ul className="detail-errors">
-                  {r.errors.map((err, i) => (
+                  {(Array.isArray(r.errors) ? r.errors : []).map((err, i) => (
                     <li key={i}>
                       <strong>{err.field}:</strong> {err.message}
                     </li>
                   ))}
                 </ul>
+                {!Array.isArray(r.errors) || r.errors.length === 0 ? (
+                  <p className="na-text">No error details recorded for this parcel.</p>
+                ) : null}
                 {(r.input || r.inputSummary) && (
                   <div className="detail-input">
                     <span className="detail-key">Submitted data:</span>
@@ -347,7 +382,9 @@ export default function BatchResults({ data }) {
 
       {/* Metadata */}
       <div className="result-meta">
-        Processed at {new Date(summary.processedAt).toLocaleString()}
+        {processedAtValid
+          ? `Processed at ${processedAt.toLocaleString()}`
+          : 'Processed time unavailable'}
       </div>
     </div>
   );

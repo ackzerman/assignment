@@ -29,17 +29,29 @@
 const { Worker } = require('bullmq');
 const { randomUUID } = require('crypto');
 const { validateParcelInput } = require('../domain/validation');
-const { hasParcelId } = require('../domain/batchProcessor');
+const { hasParcelId, generateBatchParcelId } = require('../domain/batchProcessor');
 const { routeParcel } = require('../domain/routingEngine');
 // Namespace import so tests can inject failures via jest.spyOn(store, ...).
 const store = require('./batchStore');
 const { logger } = require('../observability/logger');
 const { recordRouting, recordFailure, recordBatch, recordTerminalBatch, recordError, recordJobCompleted, recordJobFailed, recordJobRetry, workerJobStarted, workerJobFinished } = require('../observability/metrics');
-const { QUEUE_NAME, DEFAULT_REDIS_CONFIG } = require('./queue');
+const { QUEUE_NAME, getDefaultRedisConfig } = require('./queue');
 const { positiveIntOrDefault } = require('../config');
 
-const DEFAULT_CHUNK_SIZE = positiveIntOrDefault(process.env.BATCH_CHUNK_SIZE, 500);
-const DEFAULT_CHUNK_LEASE_MS = positiveIntOrDefault(process.env.CHUNK_LEASE_MS, 300000);
+/**
+ * Chunk claim lease, read lazily so late env changes (tests, container
+ * reconfiguration) apply to long-lived workers. Must stay a safe positive
+ * duration: zero/negative/NaN would create immediately-expiring leases and
+ * break worker ownership.
+ */
+function getChunkLeaseMs() {
+  return positiveIntOrDefault(process.env.CHUNK_LEASE_MS, 300000);
+}
+
+// Deprecated static snapshot (module-load env capture goes stale in
+// long-lived processes). Kept for backward compatibility; internal code
+// uses getChunkLeaseMs(). Will be removed.
+const DEFAULT_CHUNK_LEASE_MS = 300000;
 
 let worker = null;
 
@@ -52,7 +64,7 @@ let worker = null;
  * @returns {Worker} The BullMQ worker instance
  */
 function createWorker(options = {}) {
-  const connection = options.connection || DEFAULT_REDIS_CONFIG;
+  const connection = options.connection || getDefaultRedisConfig();
   const concurrency = options.concurrency || 1;
 
   worker = new Worker(
@@ -67,7 +79,7 @@ function createWorker(options = {}) {
         // batch duration. Terminal batch duration is recorded separately by
         // processBatchJob via recordTerminalBatch, only on the atomic
         // QUEUED/PROCESSING → COMPLETED transition.
-        const result = await processBatchJob(job, { leaseMs: DEFAULT_CHUNK_LEASE_MS });
+        const result = await processBatchJob(job, { leaseMs: getChunkLeaseMs() });
         recordJobCompleted(Date.now() - started);
         return result;
       } finally {
@@ -95,7 +107,11 @@ function createWorker(options = {}) {
     });
   });
 
-  worker.on('failed', (job, err) => handleJobFailed(job, err));
+  worker.on('failed', (job, err) => {
+    handleJobFailed(job, err).catch((handlerErr) => {
+      logger.error('Job-failure handler threw', { error: handlerErr.message });
+    });
+  });
 
   worker.on('error', (err) => {
     logger.error('Worker error', {
@@ -123,7 +139,7 @@ function createWorker(options = {}) {
  *   ever expose the safe text. The throw itself still propagates through
  *   BullMQ, preserving retry/backoff behavior.
  */
-function handleJobFailed(job, err) {
+async function handleJobFailed(job, err) {
   logger.error('Batch job failed', {
     jobId: job?.id,
     batchId: job?.data?.batchId,
@@ -141,18 +157,23 @@ function handleJobFailed(job, err) {
 
   // If all retries exhausted, mark batch as FAILED in Redis state —
   // guarded so an already-terminal (e.g. COMPLETED) batch is never
-  // overwritten by a stale or duplicate job failure.
+  // overwritten by a stale or duplicate job failure. Awaited (not
+  // fire-and-forget) so a shutdown in between cannot lose the transition;
+  // callers that cannot await (the BullMQ event emitter) still get a
+  // settled promise via .catch below.
   if (job && job.attemptsMade >= (job.opts?.attempts || 3)) {
     recordJobFailed();
-    store.tryMarkBatchFailed(
-      job.data.batchId,
-      `Batch processing failed after ${job.attemptsMade} attempts.`,
-    ).catch((storeErr) => {
+    try {
+      await store.tryMarkBatchFailed(
+        job.data.batchId,
+        `Batch processing failed after ${job.attemptsMade} attempts.`,
+      );
+    } catch (storeErr) {
       logger.error('Failed to mark batch FAILED after job failure', {
         batchId: job.data.batchId,
         error: storeErr.message,
       });
-    });
+    }
   }
 }
 
@@ -177,7 +198,7 @@ function handleJobFailed(job, err) {
  */
 async function processBatchJob(job, options = {}) {
   const { batchId } = job.data;
-  const leaseMs = options.leaseMs ?? DEFAULT_CHUNK_LEASE_MS;
+  const leaseMs = options.leaseMs ?? getChunkLeaseMs();
   const executionId = options.workerId || `${job.id || 'local'}:${randomUUID().split('-')[0]}`;
 
   logger.info('Processing batch job', {
@@ -256,7 +277,9 @@ async function processBatchJob(job, options = {}) {
       // propagate to the catch — never converted into parcel rows.
       for (let index = chunk.startIndex; index < chunk.endIndex; index++) {
         const parcelData = parcels[index];
-        const parcelId = hasParcelId(parcelData?.parcelId) ? parcelData.parcelId : `P${index + 1}`;
+        // Same index-based fallback as assignParcelIds (shared contract):
+        // explicit IDs (incl. falsy-but-valid 0) are always preserved.
+        const parcelId = hasParcelId(parcelData?.parcelId) ? parcelData.parcelId : generateBatchParcelId(index);
 
         const result = processOneParcel(batchId, parcelId, parcelData, index);
         chunkResults.push(result);
@@ -335,8 +358,11 @@ async function processBatchJob(job, options = {}) {
   } catch (err) {
     // UNEXPECTED failure: release our still-held claim (ownership token, so
     // a reclaim by another worker is never disturbed) so a retry can reclaim
-    // this chunk immediately. Record a system error (not a parcel failure),
-    // and propagate so the queue retry mechanism works.
+    // this chunk immediately. Record a system error ONLY when this execution
+    // will not be retried: per-attempt recording would turn one poison batch
+    // (attempts: 3) into 3 errors and trip error_spike with just two bad
+    // batches. BullMQ exposes attemptsMade/opts.attempts on the job; direct
+    // invocations without retry metadata fail open (record).
     if (activeChunk) {
       try {
         await store.releaseChunk(batchId, activeChunk.chunkIndex, activeChunk.token);
@@ -348,7 +374,11 @@ async function processBatchJob(job, options = {}) {
         });
       }
     }
-    recordError();
+    const attemptsMade = job?.attemptsMade || 0;
+    const maxAttempts = job?.opts?.attempts || 0;
+    if (maxAttempts === 0 || attemptsMade + 1 >= maxAttempts) {
+      recordError();
+    }
     throw err;
   }
 
@@ -519,6 +549,6 @@ module.exports = {
   handleJobFailed, // Exported for failure-path testing (no live BullMQ needed)
   processBatchJob, // Exported for integration testing (mock Redis + mock job)
   processOneParcel, // Exported for unit testing
-  DEFAULT_CHUNK_SIZE,
-  DEFAULT_CHUNK_LEASE_MS,
+  getChunkLeaseMs,
+  DEFAULT_CHUNK_LEASE_MS, // Deprecated alias; use getChunkLeaseMs()
 };

@@ -50,12 +50,18 @@ app.use(createCorsMiddleware());
 // --- 4. Rate Limiting ---
 // The strict batch-creation limiter (30 / 10 min) applies ONLY to
 // POST /api/batches (each creation enqueues expensive worker capacity).
-// GET status/results polling bypasses the general limiter (see
-// isBatchPollRequest) and uses a dedicated polling limiter (1200 / 15 min)
-// mounted on the batch GET routes — otherwise a normal batch taking
-// longer than ~10 polls would 429 legitimate polling.
+// Method-aware app.use (not app.post): exact-match app.post would miss
+// POST /api/batches/ (trailing slash) and let it bypass the limiter while
+// still reaching the router. GET status/results polling bypasses the
+// general limiter (see isBatchPollRequest) and uses a dedicated polling
+// limiter (1200 / 15 min) mounted on the batch GET routes — otherwise a
+// normal batch taking longer than ~10 polls would 429 legitimate polling.
+const batchCreationLimiter = createBatchRateLimiter();
 app.use('/api/', createGeneralRateLimiter());
-app.post('/api/batches', createBatchRateLimiter());
+app.use('/api/batches', (req, res, next) => {
+  if (req.method === 'POST') return batchCreationLimiter(req, res, next);
+  next();
+});
 
 // --- 5. Body Parsing ---
 app.use(express.json({ limit: '10mb' }));

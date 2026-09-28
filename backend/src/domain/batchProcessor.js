@@ -103,11 +103,20 @@ function validateParcelId(value) {
  * Assigns fallback parcel IDs (`P{index+1}`) to parcels that do not provide
  * one. Presence uses hasParcelId (not truthiness), so valid falsy IDs like
  * 0 are preserved. Pure function — returns a new array, never mutates input.
+ *
+ * Batch scope uses index-based IDs so operators can correlate rows by
+ * position. The single-parcel API has no index context and uses a
+ * `P-<8hex>` fallback instead (see parcelRoutes.js) — both forms satisfy
+ * the shared hasParcelId/validateParcelId contract above.
  */
+function generateBatchParcelId(index) {
+  return `P${index + 1}`;
+}
+
 function assignParcelIds(parcels) {
   return parcels.map((p, i) => {
     if (p && typeof p === 'object' && !hasParcelId(p.parcelId)) {
-      return { ...p, parcelId: `P${i + 1}` };
+      return { ...p, parcelId: generateBatchParcelId(i) };
     }
     return p;
   });
@@ -135,6 +144,7 @@ function findDuplicateParcelId(parcels) {
 module.exports = {
   validateBatchInput,
   assignParcelIds,
+  generateBatchParcelId,
   findDuplicateParcelId,
   hasParcelId,
   validateParcelId,

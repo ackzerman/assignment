@@ -117,6 +117,24 @@ describe('Batch state-machine races', () => {
     expect((await store.getBatchState(id)).status).toBe('COMPLETED');
   });
 
+  it('setBatchStatus rejects non-edges (QUEUED→COMPLETED/COMPLETED_WITH_ERRORS)', async () => {
+    const id = batchId('edges');
+    await store.createBatchState(id, parcels(2), 2);
+
+    // QUEUED → COMPLETED would finalize an unprocessed batch: rejected.
+    await expect(store.setBatchStatus(id, 'COMPLETED')).rejects.toThrow(/not a valid state-machine edge/i);
+    await expect(store.setBatchStatus(id, 'COMPLETED_WITH_ERRORS')).rejects.toThrow(/not a valid state-machine edge/i);
+    expect((await store.getBatchState(id)).status).toBe('QUEUED');
+
+    // Legal edges still work. Same-status rewrites are no-ops (allowed).
+    await store.setBatchStatus(id, 'PROCESSING', { startedAt: new Date().toISOString() });
+    expect((await store.getBatchState(id)).status).toBe('PROCESSING');
+    await store.setBatchStatus(id, 'PROCESSING');
+    expect((await store.getBatchState(id)).status).toBe('PROCESSING');
+    await store.setBatchStatus(id, 'FAILED', { error: 'x' });
+    expect((await store.getBatchState(id)).status).toBe('FAILED');
+  });
+
   it('markBatchFailed never overwrites a terminal batch', async () => {
     const id = batchId('mbf');
     await store.createBatchState(id, parcels(2), 2);

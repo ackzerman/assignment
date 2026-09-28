@@ -37,8 +37,10 @@ function createCorsMiddleware() {
   const isDev = process.env.NODE_ENV !== 'production';
 
   if (isDev) {
-    // Development: allow any origin (Vite runs on varying ports)
-    return cors();
+    // Development: allow any origin (Vite runs on varying ports), but expose
+    // the same headers as production so browser clients behave identically
+    // in dev and prod (Retry-After on 429, X-Request-ID tracing).
+    return cors({ exposedHeaders: ['X-Request-ID', 'Retry-After'] });
   }
 
   // Production: restrict to configured origins
@@ -100,6 +102,19 @@ function getRateLimitConfig() {
 }
 
 /**
+ * 429 handler shared by all limiters. Sets Retry-After explicitly (derived
+ * from the limiter window) instead of relying on the express-rate-limit
+ * version's default headers, so the contract holds across upgrades.
+ * The JSON body matches what clients already handle.
+ */
+function limitedHandler(message, windowMs) {
+  return (_req, res) => {
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil(windowMs / 1000))));
+    res.status(429).json({ status: 'error', message });
+  };
+}
+
+/**
  * Creates rate limiting middleware.
  *
  * Threat: DDoS / brute-force / resource exhaustion.
@@ -125,10 +140,7 @@ function createGeneralRateLimiter() {
     // createPollingRateLimiter); skip those paths here so a long-running
     // batch polling ~1/sec is never throttled by the interactive budget.
     skip: isBatchPollRequest,
-    message: {
-      status: 'error',
-      message: 'Too many requests. Please try again later.',
-    },
+    handler: limitedHandler('Too many requests. Please try again later.', cfg.windowMs),
   });
 }
 
@@ -159,10 +171,7 @@ function createPollingRateLimiter() {
     max: cfg.max,
     standardHeaders: true,
     legacyHeaders: false,
-    message: {
-      status: 'error',
-      message: 'Too many status requests. Please slow down polling.',
-    },
+    handler: limitedHandler('Too many status requests. Please slow down polling.', cfg.windowMs),
   });
 }
 
@@ -173,10 +182,7 @@ function createBatchRateLimiter() {
     max: cfg.max,
     standardHeaders: true,
     legacyHeaders: false,
-    message: {
-      status: 'error',
-      message: 'Too many batch requests. Please try again later.',
-    },
+    handler: limitedHandler('Too many batch requests. Please try again later.', cfg.windowMs),
   });
 }
 

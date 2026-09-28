@@ -58,8 +58,13 @@ function errorHandler(err, req, res, _next) {
     return;
   }
 
-  // Known operational errors — safe to return message
+  // Known operational errors — safe to return message.
+  // 5xx operational failures (503 Redis/queue down) also feed the error
+  // metric so outage storms are visible to anomaly detection; 4xx (incl.
+  // 429 backpressure/rate-limit) stays out — those are client-caused, and
+  // counting every throttled poll as a system error would fake spikes.
   if (err instanceof AppError && err.isOperational) {
+    if (err.statusCode >= 500) recordError();
     res.status(err.statusCode).json({
       status: 'error',
       message: err.message,

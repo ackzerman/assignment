@@ -539,11 +539,35 @@
   margin-bottom: 16px;
 }
 
-.batch-reference {
-  font-size: 0.75rem;
-  color: var(--color-text-muted, #6b7280);
-  margin: 4px 0 0;
-  word-break: break-all;
+/* Circular batch progress indicator — operator-facing only.
+   Compact ring (~72px) with the percentage centered inside. */
+.batch-progress-ring {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
+}
+
+.batch-progress-circle {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: conic-gradient(var(--color-primary) var(--p, 0%), var(--color-border) var(--p, 0%));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.batch-progress-value {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--color-surface, #ffffff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--color-text);
 }
 
 .batch-failed-banner strong {
@@ -720,7 +744,8 @@
   border-bottom: 1px solid var(--color-border);
 }
 
-.batch-row.invalid {
+.batch-row.invalid,
+.batch-row.error {
   background: rgba(239, 68, 68, 0.03);
 }
 
@@ -750,8 +775,21 @@
   color: #991b1b;
 }
 
+/* Batch completion line (operator-facing status under "Batch Results") */
+.batch-meta {
+  margin-bottom: 16px;
+}
+
+.batch-meta p {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+
 /* Small department badge for table */
-.dept-badge-sm {
+.dept-badge-sm,
+.approval-type-badge {
   display: inline-block;
   padding: 2px 10px;
   border-radius: 12px;
@@ -760,19 +798,31 @@
   font-size: 0.8125rem;
 }
 
-/* Small approval badge for table */
+/* Small approval badges for the batch table: boxed like .approval-badge,
+   one badge per approval type (same colors as the detail view). */
+.approval-badges-cell {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .approval-badge-sm {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
   font-size: 0.8125rem;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .approval-badge-sm.required {
-  color: #92400e;
+  border: 1px solid transparent;
   font-weight: 700;
 }
 
 .approval-badge-sm.not-required {
+  background: #ecfdf5;
   color: #065f46;
+  border: 1px solid #a7f3d0;
 }
 
 .na-text {
